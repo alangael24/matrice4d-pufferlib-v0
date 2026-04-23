@@ -46,6 +46,8 @@ struct DroneEnv {
     float hover_dist;
     float hover_omega;
     float hover_vel;
+    float domain_randomization;
+    float action_scale;
 };
 
 void init(DroneEnv* env) {
@@ -108,7 +110,8 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->buffer = env->ring_buffer;
     agent->buffer_size = env->max_rings;
 
-    init_drone(agent, &env->rng, 0.05f);
+    init_drone(agent, &env->rng, env->domain_randomization);
+    agent->params.action_scale = env->action_scale;
 
     agent->state.pos =
         (Vec3){rndf(-MARGIN_X, MARGIN_X, &env->rng), rndf(-MARGIN_Y, MARGIN_Y, &env->rng), rndf(-MARGIN_Z, MARGIN_Z, &env->rng)};

@@ -22,6 +22,10 @@ spin directions are out of scope for V0.
   - `tau_y = sum(-x_i * T_i)`
   - `tau_z = k_drag * sum(yaw_sign_i * T_i)`
 - Action `0` maps to hover trim from the CAD allocation matrix.
+- `env.action_scale` scales policy actions around hover trim. `1.0` preserves
+  the full baseline range; `0.2` or `0.3` is intended for easy curriculum runs.
+- `env.domain_randomization` controls the per-reset physics randomization
+  amount. `0.05` is the baseline; `0.0` disables it.
 - Observations remain the PufferLib 23-float drone observation vector, with
   body-frame velocity and body-frame target vector.
 - Render fallback uses the same CAD motor positions instead of the original
@@ -58,6 +62,8 @@ hover_rpm: 5525.0
 ```text
 num_layers = 3
 total_timesteps = 3000000
+domain_randomization = 0.05
+action_scale = 1.0
 ```
 
 Use the short run to catch NaNs, reset bugs, unstable rewards, and visualization

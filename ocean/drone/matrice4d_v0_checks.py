@@ -129,6 +129,18 @@ def main() -> int:
         raise AssertionError("config/drone.ini should use integer num_layers = 3")
     if re.search(r"(?m)^total_timesteps\s*=\s*3000000\s*$", config_text) is None:
         raise AssertionError("config/drone.ini should default to a 3M timestep smoke run")
+    if re.search(r"(?m)^domain_randomization\s*=\s*0\.05\s*$", config_text) is None:
+        raise AssertionError("config/drone.ini should expose baseline domain_randomization = 0.05")
+    if re.search(r"(?m)^action_scale\s*=\s*1\.0\s*$", config_text) is None:
+        raise AssertionError("config/drone.ini should expose baseline action_scale = 1.0")
+
+    if "agent->params.action_scale = env->action_scale;" not in drone_h_text:
+        raise AssertionError("env.action_scale is not wired into drone params")
+    if "init_drone(agent, &env->rng, env->domain_randomization);" not in drone_h_text:
+        raise AssertionError("env.domain_randomization is not wired into reset")
+    dronelib_text = DRONELIB.read_text(encoding="utf-8", errors="replace")
+    if "actions[i] * params->action_scale" not in dronelib_text:
+        raise AssertionError("actions are not scaled around hover trim")
 
     print("Matrice 4D V0 checks passed")
     print("motor_order:", motor_order)

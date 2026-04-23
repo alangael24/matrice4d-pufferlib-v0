@@ -140,6 +140,7 @@ typedef struct {
     float max_vel;    // m/s (observation clamp)
     float max_omega;  // rad/s (observation clamp)
     float k_mot;      // s (motor RPM time constant)
+    float action_scale; // policy action multiplier around hover trim
 } Params;
 
 typedef struct {
@@ -358,6 +359,7 @@ static inline void init_drone(Drone* drone, unsigned int* rng, float dr) {
     drone->params.max_omega = BASE_MAX_OMEGA;
 
     drone->params.k_mot = BASE_K_MOT * rndf(1.0f - dr, 1.0f + dr, rng);
+    drone->params.action_scale = 1.0f;
 
     // Exact CAD motor datums. Keep deterministic for CAD/physics congruence.
     drone->params.motor_x[0] = BASE_MOTOR_FL_X;
@@ -392,9 +394,10 @@ static inline void compute_derivatives(State* state, Params* params, float* acti
     float max_thrust = max_motor_thrust(params);
     float target_rpms[4];
     for (int i = 0; i < 4; i++) {
-        float target_thrust = actions[i] >= 0.0f
-            ? trim[i] + actions[i] * (max_thrust - trim[i])
-            : trim[i] + actions[i] * trim[i];
+        float action = clampf(actions[i] * params->action_scale, -1.0f, 1.0f);
+        float target_thrust = action >= 0.0f
+            ? trim[i] + action * (max_thrust - trim[i])
+            : trim[i] + action * trim[i];
         target_rpms[i] = thrust_to_rpm(params, target_thrust);
     }
 

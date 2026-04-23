@@ -21,6 +21,8 @@ void my_init(Env* env, Dict* kwargs) {
     env->hover_dist = dict_get(kwargs, "hover_dist")->value;
     env->hover_omega = dict_get(kwargs, "hover_omega")->value;
     env->hover_vel = dict_get(kwargs, "hover_vel")->value;
+    env->domain_randomization = dict_get(kwargs, "domain_randomization")->value;
+    env->action_scale = dict_get(kwargs, "action_scale")->value;
     init(env);
 }
 
