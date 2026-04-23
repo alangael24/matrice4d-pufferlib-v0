@@ -18,6 +18,8 @@ DRONELIB = ROOT / "dronelib.h"
 RENDER = ROOT / "render.h"
 BINDING = ROOT / "binding.c"
 DRONE_H = ROOT / "drone.h"
+TASKS_H = ROOT / "tasks.h"
+CONFIG = ROOT.parents[1] / "config" / "drone.ini"
 
 
 def read_macros(path: Path) -> dict[str, float]:
@@ -110,6 +112,23 @@ def main() -> int:
     drone_h_text = DRONE_H.read_text(encoding="utf-8", errors="replace")
     if "#define OBS_SIZE 23" not in binding_text or "observations + i*23" not in drone_h_text:
         raise AssertionError("OBS_SIZE and drone observation stride diverged")
+    if drone_h_text.count("finalize_reset_potential(env, agent);") != 2:
+        raise AssertionError("reset potential must be finalized after set_target in c_reset and c_step")
+
+    tasks_text = TASKS_H.read_text(encoding="utf-8", errors="replace")
+    for expected in [
+        "agent->target->normal = (Vec3){0.0f, 0.0f, 1.0f};",
+        "agent->target->orientation = (Quat){1.0f, 0.0f, 0.0f, 0.0f};",
+        "agent->target->radius = 0.0f;",
+    ]:
+        if expected not in tasks_text:
+            raise AssertionError("hover target metadata is incomplete")
+
+    config_text = CONFIG.read_text(encoding="utf-8", errors="replace")
+    if re.search(r"(?m)^num_layers\s*=\s*3\s*$", config_text) is None:
+        raise AssertionError("config/drone.ini should use integer num_layers = 3")
+    if re.search(r"(?m)^total_timesteps\s*=\s*3000000\s*$", config_text) is None:
+        raise AssertionError("config/drone.ini should default to a 3M timestep smoke run")
 
     print("Matrice 4D V0 checks passed")
     print("motor_order:", motor_order)

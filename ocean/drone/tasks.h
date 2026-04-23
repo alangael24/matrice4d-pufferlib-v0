@@ -78,6 +78,9 @@ void set_target_hover(unsigned int* rng, Drone* agent, float hover_target_dist) 
         clampf(p.z, -MARGIN_Z, MARGIN_Z)
     };
     agent->target->vel = (Vec3){0.0f, 0.0f, 0.0f};
+    agent->target->normal = (Vec3){0.0f, 0.0f, 1.0f};
+    agent->target->orientation = (Quat){1.0f, 0.0f, 0.0f, 0.0f};
+    agent->target->radius = 0.0f;
 }
 
 void set_target_orbit(Drone* agent, int idx, int num_agents) {

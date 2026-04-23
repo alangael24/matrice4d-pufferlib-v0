@@ -50,3 +50,15 @@ Expected output includes:
 Matrice 4D V0 checks passed
 hover_rpm: 5525.0
 ```
+
+## First Smoke Training
+
+`config/drone.ini` is set for a short first run:
+
+```text
+num_layers = 3
+total_timesteps = 3000000
+```
+
+Use the short run to catch NaNs, reset bugs, unstable rewards, and visualization
+issues before launching a longer 40M+ timestep training job.

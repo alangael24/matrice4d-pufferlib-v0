@@ -121,6 +121,10 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     }
 
     agent->prev_pos = agent->state.pos;
+}
+
+static inline void finalize_reset_potential(DroneEnv* env, Drone* agent) {
+    agent->prev_pos = agent->state.pos;
     agent->prev_potential = hover_potential(agent, env->hover_dist, env->hover_omega, env->hover_vel);
 }
 
@@ -133,6 +137,7 @@ void c_reset(DroneEnv* env) {
         Drone* agent = &env->agents[i];
         reset_agent(env, agent, i);
         set_target(&env->rng, env->task, env->agents, i, env->num_agents, env->hover_target_dist);
+        finalize_reset_potential(env, agent);
     }
 
     compute_observations(env);
@@ -179,6 +184,7 @@ void c_step(DroneEnv* env) {
             add_log(env, i, oob, timeout);
             reset_agent(env, agent, i);
             set_target(&env->rng, env->task, env->agents, i, env->num_agents, env->hover_target_dist);
+            finalize_reset_potential(env, agent);
         }
     }
 
