@@ -14,28 +14,42 @@
 #define HEIGHT 720
 #define TRAIL_LENGTH 50
 
-// Crazyflie Physical Constants
-// https://github.com/arplaboratory/learning-to-fly
-#define BASE_MASS 0.027f         // kg
-#define BASE_IXX 3.85e-6f        // kgm²
-#define BASE_IYY 3.85e-6f        // kgm²
-#define BASE_IZZ 5.9675e-6f      // kgm²
-#define BASE_ARM_LEN 0.0396f     // m
-#define BASE_K_THRUST 3.16e-10f  // thrust coefficient
-#define BASE_K_DRAG 0.005964552f // yaw moment constant
-#define BASE_GRAVITY 9.81f       // m/s^2
-#define BASE_MAX_RPM 21702.0f    // RPM
-#define BASE_K_MOT 0.15f         // s (RPM time constant)
+// Matrice 4D V0 CAD-aligned flight-dynamics profile.
+// Scope: hover/go-to-point RL, not a full physical digital twin.
+#define BASE_MASS 1.850f
+#define BASE_IXX 4.0250e-2f        // kgm²
+#define BASE_IYY 3.9390e-2f        // kgm²
+#define BASE_IZZ 7.0230e-2f      // kgm²
+#define BASE_ARM_LEN 0.24925f       // m, legacy equivalent only
+#define BASE_K_THRUST 1.4863332e-7f // N/RPM^2, hover at 5525 RPM
+#define BASE_K_DRAG 0.020f          // estimated yaw moment / thrust ratio
+#define BASE_GRAVITY 9.81f
+#define BASE_MAX_RPM 8500.0f
+#define BASE_K_MOT 0.20f
 
-#define BASE_K_ANG_DAMP 0.0f // angular damping coefficient
-#define BASE_B_DRAG 0.0f     // linear drag coefficient
-#define BASE_MAX_VEL 20.0f   // m/s
-#define BASE_MAX_OMEGA 20.0f // rad/s
+#define BASE_K_ANG_DAMP 0.010f
+#define BASE_B_DRAG 0.150f
+#define BASE_MAX_VEL 21.0f
+#define BASE_MAX_OMEGA 3.4906585f // rad/s = 200 deg/s
+
+// DJI Matrice 4D CAD motor datums, meters, motor/action order [FL, FR, RL, RR].
+#define BASE_MOTOR_FL_X -0.1915f
+#define BASE_MOTOR_FL_Y  0.1708f
+#define BASE_MOTOR_FR_X  0.1915f
+#define BASE_MOTOR_FR_Y  0.1708f
+#define BASE_MOTOR_RL_X -0.1715f
+#define BASE_MOTOR_RL_Y -0.1708f
+#define BASE_MOTOR_RR_X  0.1715f
+#define BASE_MOTOR_RR_Y -0.1708f
+#define BASE_YAW_SIGN_FL  1.0f
+#define BASE_YAW_SIGN_FR -1.0f
+#define BASE_YAW_SIGN_RL -1.0f
+#define BASE_YAW_SIGN_RR  1.0f
 
 // Simulation properties
-#define GRID_X 30.0f
-#define GRID_Y 30.0f
-#define GRID_Z 10.0f
+#define GRID_X 120.0f
+#define GRID_Y 120.0f
+#define GRID_Z 60.0f
 #define MARGIN_X (GRID_X - 1)
 #define MARGIN_Y (GRID_Y - 1)
 #define MARGIN_Z (GRID_Z - 1)
@@ -113,7 +127,10 @@ typedef struct {
     float ixx;        // kgm^2
     float iyy;        // kgm^2
     float izz;        // kgm^2
-    float arm_len;    // m
+    float arm_len;     // m, retained for legacy/reference only
+    float motor_x[4];  // m, action/motor order: [FL, FR, RL, RR]
+    float motor_y[4];  // m, action/motor order: [FL, FR, RL, RR]
+    float yaw_sign[4]; // rotor reaction torque signs, same motor order
     float k_thrust;   // thrust coefficient (T = k * rpm^2)
     float k_ang_damp; // angular damping coefficient
     float k_drag;     // yaw moment constant (torque-to-thrust ratio style)
@@ -261,17 +278,67 @@ static inline Target rndring(unsigned int* rng, float radius) {
     return ring;
 }
 
-static inline float rpm_hover(const Params* p) {
-    // total thrust = m*g = 4 * k_thrust * rpm^2
-    return sqrtf((p->mass * p->gravity) / (4.0f * p->k_thrust));
+static inline float max_motor_thrust(const Params* p) {
+    return p->k_thrust * p->max_rpm * p->max_rpm;
 }
 
-static inline float rpm_min_for_centered_hover(const Params* p) {
-    // choose min_rpm so that action=0 -> (min+max)/2 == hover
-    float min_rpm = 2.0f * rpm_hover(p) - p->max_rpm;
-    if (min_rpm < 0.0f) min_rpm = 0.0f;
-    if (min_rpm > p->max_rpm) min_rpm = p->max_rpm;
-    return min_rpm;
+static inline bool solve_allocation(const Params* p, float total_thrust, Vec3 torque, float out[4]) {
+    float a[4][5] = {
+        {1.0f, 1.0f, 1.0f, 1.0f, total_thrust},
+        {p->motor_y[0], p->motor_y[1], p->motor_y[2], p->motor_y[3], torque.x},
+        {-p->motor_x[0], -p->motor_x[1], -p->motor_x[2], -p->motor_x[3], torque.y},
+        {p->k_drag * p->yaw_sign[0], p->k_drag * p->yaw_sign[1],
+         p->k_drag * p->yaw_sign[2], p->k_drag * p->yaw_sign[3], torque.z},
+    };
+
+    for (int col = 0; col < 4; col++) {
+        int pivot = col;
+        float best = fabsf(a[col][col]);
+        for (int row = col + 1; row < 4; row++) {
+            float candidate = fabsf(a[row][col]);
+            if (candidate > best) {
+                best = candidate;
+                pivot = row;
+            }
+        }
+
+        if (best < 1e-8f) return false;
+
+        if (pivot != col) {
+            for (int k = col; k < 5; k++) {
+                float tmp = a[col][k];
+                a[col][k] = a[pivot][k];
+                a[pivot][k] = tmp;
+            }
+        }
+
+        float inv = 1.0f / a[col][col];
+        for (int k = col; k < 5; k++) a[col][k] *= inv;
+
+        for (int row = 0; row < 4; row++) {
+            if (row == col) continue;
+            float f = a[row][col];
+            for (int k = col; k < 5; k++) a[row][k] -= f * a[col][k];
+        }
+    }
+
+    float max_t = max_motor_thrust(p);
+    for (int i = 0; i < 4; i++) {
+        out[i] = clampf(a[i][4], 0.0f, max_t);
+    }
+    return true;
+}
+
+static inline void hover_trim_thrusts(const Params* p, float out[4]) {
+    if (!solve_allocation(p, p->mass * p->gravity, (Vec3){0.0f, 0.0f, 0.0f}, out)) {
+        float fallback = 0.25f * p->mass * p->gravity;
+        for (int i = 0; i < 4; i++) out[i] = fallback;
+    }
+}
+
+static inline float thrust_to_rpm(const Params* p, float thrust) {
+    thrust = clampf(thrust, 0.0f, max_motor_thrust(p));
+    return sqrtf(thrust / p->k_thrust);
 }
 
 static inline void init_drone(Drone* drone, unsigned int* rng, float dr) {
@@ -292,9 +359,24 @@ static inline void init_drone(Drone* drone, unsigned int* rng, float dr) {
 
     drone->params.k_mot = BASE_K_MOT * rndf(1.0f - dr, 1.0f + dr, rng);
 
-    float hover = rpm_hover(&drone->params);
+    // Exact CAD motor datums. Keep deterministic for CAD/physics congruence.
+    drone->params.motor_x[0] = BASE_MOTOR_FL_X;
+    drone->params.motor_y[0] = BASE_MOTOR_FL_Y;
+    drone->params.yaw_sign[0] = BASE_YAW_SIGN_FL;
+    drone->params.motor_x[1] = BASE_MOTOR_FR_X;
+    drone->params.motor_y[1] = BASE_MOTOR_FR_Y;
+    drone->params.yaw_sign[1] = BASE_YAW_SIGN_FR;
+    drone->params.motor_x[2] = BASE_MOTOR_RL_X;
+    drone->params.motor_y[2] = BASE_MOTOR_RL_Y;
+    drone->params.yaw_sign[2] = BASE_YAW_SIGN_RL;
+    drone->params.motor_x[3] = BASE_MOTOR_RR_X;
+    drone->params.motor_y[3] = BASE_MOTOR_RR_Y;
+    drone->params.yaw_sign[3] = BASE_YAW_SIGN_RR;
+
+    float trim[4];
+    hover_trim_thrusts(&drone->params, trim);
     for (int i = 0; i < 4; i++)
-        drone->state.rpms[i] = hover;
+        drone->state.rpms[i] = thrust_to_rpm(&drone->params, trim[i]);
 
     drone->state.pos = (Vec3){0.0f, 0.0f, 0.0f};
     drone->prev_pos = drone->state.pos;
@@ -305,12 +387,15 @@ static inline void init_drone(Drone* drone, unsigned int* rng, float dr) {
 
 static inline void compute_derivatives(State* state, Params* params, float* actions,
                                        StateDerivative* derivatives) {
-    float min_rpm = rpm_min_for_centered_hover(params);
-
+    float trim[4];
+    hover_trim_thrusts(params, trim);
+    float max_thrust = max_motor_thrust(params);
     float target_rpms[4];
     for (int i = 0; i < 4; i++) {
-        float u = (actions[i] + 1.0f) * 0.5f; // [0,1]
-        target_rpms[i] = min_rpm + u * (params->max_rpm - min_rpm);
+        float target_thrust = actions[i] >= 0.0f
+            ? trim[i] + actions[i] * (max_thrust - trim[i])
+            : trim[i] + actions[i] * trim[i];
+        target_rpms[i] = thrust_to_rpm(params, target_thrust);
     }
 
     float rpm_dot[4];
@@ -358,14 +443,18 @@ static inline void compute_derivatives(State* state, Params* params, float* acti
     // Tau_prop.y = params->arm_len*(T[2] - T[0]);
     // Tau_prop.z = params->k_drag*(T[0] - T[1] + T[2] - T[3]);
 
-    // body frame torques (cross copter)
-    // M1=FR, M2=BR, M3=BL, M4=FL
-    // https://www.bitcraze.io/documentation/hardware/crazyflie_2_1_brushless/crazyflie_2_1_brushless-datasheet.pdf
-    float arm_factor = params->arm_len / sqrtf(2.0f);
     Vec3 Tau_prop;
-    Tau_prop.x = arm_factor * ((T[2] + T[3]) - (T[0] + T[1]));
-    Tau_prop.y = arm_factor * ((T[1] + T[2]) - (T[0] + T[3]));
-    Tau_prop.z = params->k_drag * (-T[0] + T[1] - T[2] + T[3]);
+    // CAD-aligned body torques from exact motor lever arms.
+    // Motor/action order: [FL, FR, RL, RR].
+    // tau_x = sum(y_i*T_i), tau_y = sum(-x_i*T_i).
+    Tau_prop.x = 0.0f;
+    Tau_prop.y = 0.0f;
+    Tau_prop.z = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        Tau_prop.x += params->motor_y[i] * T[i];
+        Tau_prop.y += -params->motor_x[i] * T[i];
+        Tau_prop.z += params->k_drag * params->yaw_sign[i] * T[i];
+    }
 
     // torque from angular damping
     Vec3 Tau_aero;

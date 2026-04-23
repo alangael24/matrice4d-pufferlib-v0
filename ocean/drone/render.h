@@ -22,11 +22,11 @@ Color COLORS[64] = {W, B, B, R, R, B, B, W, B, W, B, R, R, B, W, B, B, B, W, R, 
 #undef B
 
 // 3D model config
-#define MODEL_SCALE_DEFAULT 5.0f
+#define MODEL_SCALE_DEFAULT 1.0f
 #define MODEL_SCALE_NORMAL 1.0f
 #define NUM_PROPELLERS 4
-static const int PROP_MESH_IDX[NUM_PROPELLERS] = {8, 6, 5, 7};
-static const float PROP_DIRS[NUM_PROPELLERS] = {1.0f, -1.0f, 1.0f, -1.0f};
+static const int PROP_MESH_IDX[NUM_PROPELLERS] = {-1, -1, -1, -1};
+static const float PROP_DIRS[NUM_PROPELLERS] = {1.0f, -1.0f, -1.0f, 1.0f};
 
 typedef struct Client Client;
 
@@ -265,8 +265,14 @@ Client* make_client(DroneEnv* env) {
     client->render_mode = 0;
 
     // Load 3D model
-    const char* model_paths[] = {"resources/crazyflie.glb", "resources/drone/crazyflie.glb",
-                                 "crazyflie.glb", NULL};
+    const char* model_paths[] = {
+        "resources/drone/matrice4d.glb",
+        "resources/matrice4d.glb",
+        "matrice4d.glb",
+        "resources/drone/crazyflie.glb",
+        "resources/crazyflie.glb",
+        "crazyflie.glb",
+        NULL};
 
     for (int i = 0; model_paths[i] != NULL; i++) {
         if (FileExists(model_paths[i])) {
@@ -280,7 +286,7 @@ Client* make_client(DroneEnv* env) {
                 for (int p = 0; p < NUM_PROPELLERS; p++) {
                     int idx = PROP_MESH_IDX[p];
 
-                    if (idx < client->drone_model.meshCount) {
+                    if (idx >= 0 && idx < client->drone_model.meshCount) {
                         client->prop_centers[p] =
                             compute_mesh_center(&client->drone_model.meshes[idx]);
                     }
@@ -383,13 +389,14 @@ void DrawDronePrimitive(Client* client, Drone* agent, float* actions, Color body
 
     DrawSphere((Vector3){agent->state.pos.x, agent->state.pos.y, agent->state.pos.z}, 0.06f * scale,
                body_color);
-
     const float rotor_radius = 0.03f * scale;
-    const float arm_len = 0.15f * scale;
-    const float diag = arm_len * 0.7071f; // 1/sqrt(2)
 
+    // CAD-aligned primitive fallback. Motor/action order: [FL, FR, RL, RR].
     Vec3 rotor_offsets[4] = {
-        {+diag, +diag, 0.0f}, {+diag, -diag, 0.0f}, {-diag, -diag, 0.0f}, {-diag, +diag, 0.0f}};
+        {agent->params.motor_x[0] * scale, agent->params.motor_y[0] * scale, 0.0f},
+        {agent->params.motor_x[1] * scale, agent->params.motor_y[1] * scale, 0.0f},
+        {agent->params.motor_x[2] * scale, agent->params.motor_y[2] * scale, 0.0f},
+        {agent->params.motor_x[3] * scale, agent->params.motor_y[3] * scale, 0.0f}};
 
     for (int j = 0; j < 4; j++) {
         Vec3 world_off = quat_rotate(agent->state.quat, rotor_offsets[j]);
