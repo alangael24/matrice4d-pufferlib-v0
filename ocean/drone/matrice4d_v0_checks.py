@@ -125,6 +125,8 @@ def main() -> int:
             raise AssertionError("hover target metadata is incomplete")
 
     config_text = CONFIG.read_text(encoding="utf-8", errors="replace")
+    if re.search(r"(?m)^hover_target_dist\s*=\s*5\.0\s*$", config_text) is None:
+        raise AssertionError("config/drone.ini should use float hover_target_dist = 5.0")
     if re.search(r"(?m)^num_layers\s*=\s*3\s*$", config_text) is None:
         raise AssertionError("config/drone.ini should use integer num_layers = 3")
     if re.search(r"(?m)^total_timesteps\s*=\s*3000000\s*$", config_text) is None:
