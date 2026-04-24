@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,7 @@ CSV_FIELDNAMES = [
     "reset_yaw_range",
     "reset_vel_max",
     "reset_pos_scale",
+    "oob_radius",
     "exit_code",
     "checkpoint_count",
     "latest_checkpoint_path",
@@ -138,6 +140,58 @@ def parse_metadata_value(value: str) -> Any:
     return parsed
 
 
+COMMAND_ARG_KEYS = {
+    "--tag": "tag",
+    "--checkpoint-dir": "checkpoint_dir",
+    "--log-dir": "log_dir",
+    "--checkpoint-interval": "checkpoint_interval",
+    "--seed": "seed",
+    "--train.seed": "seed",
+    "--train.total-timesteps": "timesteps",
+    "--env.hover-target-dist": "target_dist",
+    "--env.domain-randomization": "domain_randomization",
+    "--env.action-scale": "action_scale",
+    "--env.reset-yaw-range": "reset_yaw_range",
+    "--env.reset-vel-max": "reset_vel_max",
+    "--env.reset-pos-scale": "reset_pos_scale",
+    "--env.oob-radius": "oob_radius",
+    "--env.oob_radius": "oob_radius",
+    "--policy.num-layers": "policy_num_layers",
+}
+
+
+def parse_command_config(command: str) -> dict[str, Any]:
+    if not command:
+        return {}
+
+    normalized = re.sub(r"\\\s*\n", " ", command)
+    try:
+        tokens = shlex.split(normalized)
+    except ValueError:
+        tokens = normalized.split()
+
+    out: dict[str, Any] = {}
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        key = token
+        value = None
+
+        if token.startswith("--") and "=" in token:
+            key, value = token.split("=", 1)
+        elif token in COMMAND_ARG_KEYS and i + 1 < len(tokens):
+            value = tokens[i + 1]
+            i += 1
+
+        meta_key = COMMAND_ARG_KEYS.get(key)
+        if meta_key and value is not None:
+            out[meta_key] = parse_metadata_value(value)
+
+        i += 1
+
+    return out
+
+
 def latest_puffer_log_config(run_dir: Path) -> dict[str, Any]:
     log_files = sorted(
         run_dir.glob("logs/**/*.json"),
@@ -164,6 +218,7 @@ def latest_puffer_log_config(run_dir: Path) -> dict[str, Any]:
         "reset_yaw_range": env.get("reset_yaw_range"),
         "reset_vel_max": env.get("reset_vel_max"),
         "reset_pos_scale": env.get("reset_pos_scale"),
+        "oob_radius": env.get("oob_radius"),
         "policy_num_layers": policy.get("num_layers"),
         "checkpoint_interval": payload.get("checkpoint_interval"),
         "checkpoint_dir": payload.get("checkpoint_dir"),
@@ -186,6 +241,7 @@ def command_from_log_config(config: dict[str, Any]) -> str:
         "reset_yaw_range",
         "reset_vel_max",
         "reset_pos_scale",
+        "oob_radius",
         "policy_num_layers",
     ]
     if any(config.get(key) is None for key in required):
@@ -206,6 +262,7 @@ def command_from_log_config(config: dict[str, Any]) -> str:
         f"--env.reset-yaw-range {config['reset_yaw_range']} "
         f"--env.reset-vel-max {config['reset_vel_max']} "
         f"--env.reset-pos-scale {config['reset_pos_scale']} "
+        f"--env.oob-radius {config['oob_radius']} "
         f"--policy.num-layers {config['policy_num_layers']}"
     )
 
@@ -257,15 +314,21 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                 key, value = line.split("=", 1)
                 metadata[key] = parse_metadata_value(value)
 
+    command = ""
+    command_path = run_dir / "command.sh"
+    if command_path.exists():
+        command = command_path.read_text(encoding="utf-8", errors="replace").strip()
+
+    command_config = parse_command_config(command)
+    for key, value in command_config.items():
+        if value is not None:
+            metadata[key] = value
+
     log_config = latest_puffer_log_config(run_dir)
     for key, value in log_config.items():
         if value is not None and key not in metadata:
             metadata[key] = value
 
-    command = ""
-    command_path = run_dir / "command.sh"
-    if command_path.exists():
-        command = command_path.read_text(encoding="utf-8", errors="replace").strip()
     if not command:
         command = command_from_log_config(log_config)
 
@@ -319,6 +382,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 "reset_yaw_range": metadata.get("reset_yaw_range"),
                 "reset_vel_max": metadata.get("reset_vel_max"),
                 "reset_pos_scale": metadata.get("reset_pos_scale"),
+                "oob_radius": metadata.get("oob_radius"),
                 "exit_code": metadata.get("exit_code"),
                 "checkpoint_count": row.get("checkpoint_count"),
                 "latest_checkpoint_path": latest.get("path"),

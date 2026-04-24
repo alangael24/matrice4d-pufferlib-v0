@@ -122,3 +122,20 @@ python scripts/summarize_runs.py \
 `summary.csv` and `summary.json` are generated from `stdout.txt` by taking the
 last occurrence of each PufferLib metric. This avoids stale early-frame metrics
 from interactive terminal redraws.
+
+Run configuration columns in `summary.csv` are populated from `command.sh`
+first. `run_metadata.env` is used as base metadata, command-line overrides win
+when present, and Puffer JSON logs are used as a fallback for older runs missing
+`command.sh`. The required config columns are:
+
+```text
+seed
+timesteps
+target_dist
+action_scale
+domain_randomization
+reset_yaw_range
+reset_vel_max
+reset_pos_scale
+oob_radius
+```
