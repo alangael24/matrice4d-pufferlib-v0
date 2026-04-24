@@ -127,6 +127,8 @@ def main() -> int:
     config_text = CONFIG.read_text(encoding="utf-8", errors="replace")
     if re.search(r"(?m)^hover_target_dist\s*=\s*5\.0\s*$", config_text) is None:
         raise AssertionError("config/drone.ini should use float hover_target_dist = 5.0")
+    if re.search(r"(?m)^oob_radius\s*=\s*12\.0\s*$", config_text) is None:
+        raise AssertionError("config/drone.ini should expose oob_radius = 12.0 for target 5 m")
     if re.search(r"(?m)^num_layers\s*=\s*3\s*$", config_text) is None:
         raise AssertionError("config/drone.ini should use integer num_layers = 3")
     if re.search(r"(?m)^total_timesteps\s*=\s*3000000\s*$", config_text) is None:
@@ -140,6 +142,10 @@ def main() -> int:
         raise AssertionError("env.action_scale is not wired into drone params")
     if "init_drone(agent, &env->rng, env->domain_randomization);" not in drone_h_text:
         raise AssertionError("env.domain_randomization is not wired into reset")
+    if "env->oob_radius = dict_get(kwargs, \"oob_radius\")->value;" not in binding_text:
+        raise AssertionError("env.oob_radius is not wired through binding.c")
+    if "> env->oob_radius" not in drone_h_text:
+        raise AssertionError("OOB check is not using env.oob_radius")
     dronelib_text = DRONELIB.read_text(encoding="utf-8", errors="replace")
     if "actions[i] * params->action_scale" not in dronelib_text:
         raise AssertionError("actions are not scaled around hover trim")

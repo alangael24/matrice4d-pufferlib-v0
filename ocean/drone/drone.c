@@ -41,6 +41,7 @@ int main() {
     env->alpha_shaping = 3.9754f;
     env->alpha_omega = 0.00135588f;
     env->hover_target_dist = 5.0f;
+    env->oob_radius = 12.0f;
     env->hover_dist = 0.1f;
     env->hover_omega = 0.1f;
     env->hover_vel = 0.1f;
