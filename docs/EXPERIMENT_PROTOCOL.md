@@ -100,3 +100,7 @@ python scripts/summarize_runs.py \
   --output runs/<batch_id>/summary.json \
   --csv runs/<batch_id>/summary.csv
 ```
+
+`summary.csv` and `summary.json` are generated from `stdout.txt` by taking the
+last occurrence of each PufferLib metric. This avoids stale early-frame metrics
+from interactive terminal redraws.

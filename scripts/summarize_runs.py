@@ -55,6 +55,61 @@ METRIC_KEYS = [
 
 LOSS_KEYS = ["policy", "value", "entropy", "total", "old_kl", "kl", "clipfrac"]
 SUMMARY_KEYS = ["env", "params", "steps", "sps", "epoch"]
+CSV_FIELDNAMES = [
+    "run_name",
+    "policy",
+    "value",
+    "entropy",
+    "total",
+    "old_kl",
+    "kl",
+    "clipfrac",
+    "steps",
+    "epoch",
+    "timesteps",
+    "seed",
+    "target_dist",
+    "action_scale",
+    "domain_randomization",
+    "reset_yaw_range",
+    "reset_vel_max",
+    "reset_pos_scale",
+    "exit_code",
+    "checkpoint_count",
+    "latest_checkpoint_path",
+    "perf",
+    "score",
+    "oob",
+    "timeout",
+    "episode_return",
+    "episode_length",
+    "ema_dist",
+    "ema_vel",
+    "ema_omega",
+    "ema_omega_x",
+    "ema_omega_y",
+    "ema_omega_z",
+    "mean_abs_action",
+    "max_abs_action",
+    "action_saturation_frac",
+    "mean_abs_action_raw",
+    "max_abs_action_raw",
+    "raw_action_clip_frac",
+    "mean_abs_action_clipped",
+    "max_abs_action_clipped",
+    "clipped_action_saturation_frac",
+    "motor_clip_low_frac",
+    "motor_clip_high_frac",
+    "mean_rpm_FL",
+    "mean_rpm_FR",
+    "mean_rpm_RL",
+    "mean_rpm_RR",
+    "r_dist",
+    "r_hover",
+    "r_shaping",
+    "r_omega",
+    "r_terminal",
+]
 
 
 def parse_numeric(value: str) -> float | int | str:
@@ -76,6 +131,11 @@ def read_metric(text: str, key: str, word: bool = False) -> Any:
         return None
     match = matches[-1]
     return match.group(1) if word else parse_numeric(match.group(1))
+
+
+def parse_metadata_value(value: str) -> Any:
+    parsed = parse_numeric(value)
+    return parsed
 
 
 def parse_stdout(path: Path) -> dict[str, Any]:
@@ -123,7 +183,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         for line in metadata_path.read_text(encoding="utf-8", errors="replace").splitlines():
             if "=" in line:
                 key, value = line.split("=", 1)
-                metadata[key] = value
+                metadata[key] = parse_metadata_value(value)
 
     command = ""
     command_path = run_dir / "command.sh"
@@ -152,46 +212,37 @@ def write_json(path: Path, payload: Any) -> None:
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "run_name",
-        "exit_code",
-        "steps",
-        "perf",
-        "score",
-        "oob",
-        "timeout",
-        "episode_return",
-        "episode_length",
-        "ema_dist",
-        "ema_vel",
-        "ema_omega",
-        "ema_omega_x",
-        "ema_omega_y",
-        "ema_omega_z",
-        "mean_abs_action_raw",
-        "max_abs_action_raw",
-        "raw_action_clip_frac",
-        "mean_abs_action_clipped",
-        "max_abs_action_clipped",
-        "clipped_action_saturation_frac",
-        "motor_clip_low_frac",
-        "motor_clip_high_frac",
-        "checkpoint_count",
-        "latest_checkpoint_bytes",
-        "latest_checkpoint_path",
-    ]
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDNAMES)
         writer.writeheader()
         for row in rows:
             metrics = row.get("metrics", {})
             summary = row.get("summary", {})
+            losses = row.get("losses", {})
             metadata = row.get("metadata", {})
             latest = row.get("latest_checkpoint") or {}
             writer.writerow({
                 "run_name": row.get("run_name"),
-                "exit_code": metadata.get("exit_code"),
+                "policy": losses.get("policy"),
+                "value": losses.get("value"),
+                "entropy": losses.get("entropy"),
+                "total": losses.get("total"),
+                "old_kl": losses.get("old_kl"),
+                "kl": losses.get("kl"),
+                "clipfrac": losses.get("clipfrac"),
                 "steps": summary.get("steps"),
+                "epoch": summary.get("epoch"),
+                "timesteps": metadata.get("timesteps"),
+                "seed": metadata.get("seed"),
+                "target_dist": metadata.get("target_dist"),
+                "action_scale": metadata.get("action_scale"),
+                "domain_randomization": metadata.get("domain_randomization"),
+                "reset_yaw_range": metadata.get("reset_yaw_range"),
+                "reset_vel_max": metadata.get("reset_vel_max"),
+                "reset_pos_scale": metadata.get("reset_pos_scale"),
+                "exit_code": metadata.get("exit_code"),
+                "checkpoint_count": row.get("checkpoint_count"),
+                "latest_checkpoint_path": latest.get("path"),
                 "perf": metrics.get("perf"),
                 "score": metrics.get("score"),
                 "oob": metrics.get("oob"),
@@ -204,6 +255,9 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 "ema_omega_x": metrics.get("ema_omega_x"),
                 "ema_omega_y": metrics.get("ema_omega_y"),
                 "ema_omega_z": metrics.get("ema_omega_z"),
+                "mean_abs_action": metrics.get("mean_abs_action"),
+                "max_abs_action": metrics.get("max_abs_action"),
+                "action_saturation_frac": metrics.get("action_saturation_frac"),
                 "mean_abs_action_raw": metrics.get("mean_abs_action_raw"),
                 "max_abs_action_raw": metrics.get("max_abs_action_raw"),
                 "raw_action_clip_frac": metrics.get("raw_action_clip_frac"),
@@ -212,9 +266,15 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 "clipped_action_saturation_frac": metrics.get("clipped_action_saturation_frac"),
                 "motor_clip_low_frac": metrics.get("motor_clip_low_frac"),
                 "motor_clip_high_frac": metrics.get("motor_clip_high_frac"),
-                "checkpoint_count": row.get("checkpoint_count"),
-                "latest_checkpoint_bytes": latest.get("bytes"),
-                "latest_checkpoint_path": latest.get("path"),
+                "mean_rpm_FL": metrics.get("mean_rpm_FL"),
+                "mean_rpm_FR": metrics.get("mean_rpm_FR"),
+                "mean_rpm_RL": metrics.get("mean_rpm_RL"),
+                "mean_rpm_RR": metrics.get("mean_rpm_RR"),
+                "r_dist": metrics.get("r_dist"),
+                "r_hover": metrics.get("r_hover"),
+                "r_shaping": metrics.get("r_shaping"),
+                "r_omega": metrics.get("r_omega"),
+                "r_terminal": metrics.get("r_terminal"),
             })
 
 
