@@ -215,6 +215,16 @@ static Vec3 compute_mesh_center(Mesh* mesh) {
     return scalmul3(center, 1.0f / mesh->vertexCount);
 }
 
+static inline float env_float(const char* name, float fallback) {
+    const char* value = getenv(name);
+    return (value == NULL || value[0] == '\0') ? fallback : strtof(value, NULL);
+}
+
+static inline int env_int(const char* name, int fallback) {
+    const char* value = getenv(name);
+    return (value == NULL || value[0] == '\0') ? fallback : atoi(value);
+}
+
 Client* make_client(DroneEnv* env) {
     Client* client = (Client*)calloc(1, sizeof(Client));
 
@@ -234,9 +244,9 @@ Client* make_client(DroneEnv* env) {
         return NULL;
     }
 
-    client->camera_distance = 40.0f;
-    client->camera_azimuth = 0.0f;
-    client->camera_elevation = PI / 10.0f;
+    client->camera_distance = env_float("PUFFER_DRONE_CAMERA_DISTANCE", 40.0f);
+    client->camera_azimuth = env_float("PUFFER_DRONE_CAMERA_AZIMUTH", 0.0f);
+    client->camera_elevation = env_float("PUFFER_DRONE_CAMERA_ELEVATION", PI / 10.0f);
     client->is_dragging = false;
     client->last_mouse_pos = (Vector2){0.0f, 0.0f};
 
@@ -259,12 +269,12 @@ Client* make_client(DroneEnv* env) {
     }
 
     client->selected_drone = 0;
-    client->inspect_mode = false;
-    client->follow_mode = false;
+    client->inspect_mode = env_int("PUFFER_DRONE_INSPECT", 0) != 0;
+    client->follow_mode = env_int("PUFFER_DRONE_FOLLOW", 0) != 0;
     client->target_fps = 100;
     client->model_loaded = false;
-    client->model_scale = MODEL_SCALE_DEFAULT;
-    client->render_mode = 0;
+    client->model_scale = env_float("PUFFER_DRONE_MODEL_SCALE", MODEL_SCALE_DEFAULT);
+    client->render_mode = env_int("PUFFER_DRONE_RENDER_MODE", 0);
 
     // Load 3D model
     const char* model_paths[] = {

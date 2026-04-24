@@ -377,6 +377,7 @@ std::unique_ptr<PuffeRL> create_pufferl(py::dict args) {
     hypers.prio_alpha = get_config(train_kwargs, "prio_alpha");
     hypers.prio_beta0 = get_config(train_kwargs, "prio_beta0");
     hypers.reset_state = get_config(args, "reset_state");
+    hypers.deterministic_eval = get_config(args, "deterministic_eval");
     // Base-level config ([base] section becomes top-level in args)
     hypers.cudagraphs = get_config(args, "cudagraphs");
     hypers.profile = get_config(args, "profile");

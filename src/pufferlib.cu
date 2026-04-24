@@ -272,6 +272,7 @@ typedef struct {
     float prio_beta0;
     // Flags
     bool reset_state;
+    bool deterministic_eval;
     int cudagraphs;
     bool profile;
     // Multi-GPU
@@ -379,7 +380,8 @@ __global__ void sample_logits(
         precision_t* __restrict__ actions,    // (B, num_atns)
         precision_t* __restrict__ logprobs,   // (B,)
         precision_t* __restrict__ value_out,  // (B,)
-        curandStatePhilox4_32_10_t* __restrict__ rng_states) {
+        curandStatePhilox4_32_10_t* __restrict__ rng_states,
+        bool deterministic) {
     int B = dec_out.shape[0];
     int fused_cols = dec_out.shape[1];
     int num_atns = numel(act_sizes_puf.shape);
@@ -413,9 +415,12 @@ __global__ void sample_logits(
             float log_std = to_float(logstd[logstd_base + h]);
             float std = expf(log_std);
 
-            // Sample from N(0,1) and transform: action = mean + std * noise
-            float noise = curand_normal(&state);
-            float action = mean + std * noise;
+            // Deterministic eval uses the policy mean. Training/eval default samples normally.
+            float action = mean;
+            if (!deterministic) {
+                float noise = curand_normal(&state);
+                action = mean + std * noise;
+            }
 
             // Log probability: -0.5 * ((action - mean) / std)^2 - 0.5 * log(2*pi) - log(std)
             float normalized = (action - mean) / std;
@@ -434,30 +439,35 @@ __global__ void sample_logits(
             // Step 1: Find max and sum for numerical stability (with nan_to_num)
             float max_val = -INFINITY;
             float sum_exp = 0.0f;
+            int greedy_action = 0;
             for (int a = 0; a < A; ++a) {
                 float l = safe_logit(logits, logits_base, logits_offset, a);
                 if (l > max_val) {
                     sum_exp *= expf(max_val - l);
                     max_val = l;
+                    greedy_action = a;
                 }
                 sum_exp += expf(l - max_val);
             }
             float logsumexp = max_val + logf(sum_exp);
 
-            // Step 3: Generate random value for this action head
-            float rand_val = curand_uniform(&state);
+            int sampled_action = greedy_action;
+            if (!deterministic) {
+                // Step 3: Generate random value for this action head
+                float rand_val = curand_uniform(&state);
 
-            // Step 4: Multinomial sampling using inverse CDF
-            float cumsum = 0.0f;
-            int sampled_action = A - 1;  // default to last action
+                // Step 4: Multinomial sampling using inverse CDF
+                float cumsum = 0.0f;
+                sampled_action = A - 1;  // default to last action
 
-            for (int a = 0; a < A; ++a) {
-                float l = safe_logit(logits, logits_base, logits_offset, a);
-                float prob = expf(l - logsumexp);
-                cumsum += prob;
-                if (rand_val < cumsum) {
-                    sampled_action = a;
-                    break;
+                for (int a = 0; a < A; ++a) {
+                    float l = safe_logit(logits, logits_base, logits_offset, a);
+                    float prob = expf(l - logsumexp);
+                    cumsum += prob;
+                    if (rand_val < cumsum) {
+                        sampled_action = a;
+                        break;
+                    }
                 }
             }
 
@@ -545,7 +555,7 @@ extern "C" void net_callback_wrapper(void* ctx, int buf, int t) {
     sample_logits<<<grid_size(block_size), BLOCK_SIZE, 0, stream>>>(
         dec_puf, p_logstd, pufferl->act_sizes_puf,
         act_slice.data, lp_slice.data, val_slice.data,
-        pufferl->rng_states[buf]);
+        pufferl->rng_states[buf], hypers.deterministic_eval);
 
     // Copy actions to env
     long act_cols = env.actions.shape[1];
