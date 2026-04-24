@@ -10,6 +10,8 @@ import glob
 import json
 import ast
 import time
+import shutil
+import subprocess
 import argparse
 import configparser
 from collections import defaultdict
@@ -404,6 +406,16 @@ def eval(env_name, args=None, load_path=None):
     args['reset_state'] = False
     args['train']['horizon'] = 1
 
+    save_frames = int(args.get('save_frames') or 0)
+    frame_dir = None
+    if save_frames > 0:
+        gif_path = args.get('gif_path') or 'eval.gif'
+        stem = os.path.splitext(gif_path)[0] or 'eval'
+        frame_dir = f'{stem}_frames_{int(time.time())}'
+        os.makedirs(frame_dir, exist_ok=True)
+        os.environ['PUFFER_SAVE_FRAMES'] = str(save_frames)
+        os.environ['PUFFER_FRAME_DIR'] = frame_dir
+
     backend = _resolve_backend(args)
     pufferl = backend.create_pufferl(args)
 
@@ -421,11 +433,35 @@ def eval(env_name, args=None, load_path=None):
         backend.load_weights(pufferl, load_path)
         print(f'Loaded weights from {load_path}')
 
-    while True:
-        backend.render(pufferl, 0)
-        backend.rollouts(pufferl)
+    try:
+        if save_frames > 0:
+            for _ in range(save_frames):
+                backend.render(pufferl, 0)
+                backend.rollouts(pufferl)
 
-    backend.close(pufferl)
+            ffmpeg = shutil.which('ffmpeg')
+            if ffmpeg is None:
+                print(f'Saved {save_frames} frames to {frame_dir}. Install ffmpeg to encode {args["gif_path"]}.')
+                return
+
+            pattern = os.path.join(frame_dir, 'frame_%06d.png')
+            fps = str(args.get('fps') or 15)
+            out_path = args.get('gif_path') or 'eval.gif'
+            cmd = [ffmpeg, '-y', '-framerate', fps, '-i', pattern]
+            if out_path.lower().endswith('.gif'):
+                cmd += ['-vf', f'fps={fps},scale=960:-1:flags=lanczos']
+            else:
+                cmd += ['-pix_fmt', 'yuv420p']
+            cmd += [out_path]
+            subprocess.run(cmd, check=True)
+            print(f'Saved visual rollout to {out_path}')
+            return
+
+        while True:
+            backend.render(pufferl, 0)
+            backend.rollouts(pufferl)
+    finally:
+        backend.close(pufferl)
 
 def load_config(env_name):
     parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter, add_help=False)

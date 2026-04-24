@@ -5,6 +5,8 @@
 #pragma once
 
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "drone.h"
 #include "dronelib.h"
@@ -308,6 +310,25 @@ const Color PUFF_CYAN = (Color){0, 187, 187, 255};
 const Color PUFF_WHITE = (Color){241, 241, 241, 241};
 const Color PUFF_BACKGROUND = (Color){6, 24, 24, 255};
 const Color PUFF_GREEN = (Color){0, 220, 80, 255};
+
+static inline void maybe_save_render_frame(void) {
+    const char* frame_dir = getenv("PUFFER_FRAME_DIR");
+    if (frame_dir == NULL || frame_dir[0] == '\0') {
+        return;
+    }
+
+    static int frame = 0;
+    const char* max_frames_str = getenv("PUFFER_SAVE_FRAMES");
+    int max_frames = max_frames_str ? atoi(max_frames_str) : 0;
+    if (max_frames > 0 && frame >= max_frames) {
+        return;
+    }
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/frame_%06d.png", frame_dir, frame);
+    TakeScreenshot(path);
+    frame++;
+}
 
 void DrawRing3D(Target ring, float thickness, Color entryColor, Color exitColor) {
     float half_thick = thickness / 2.0f;
@@ -704,4 +725,5 @@ void c_render(DroneEnv* env) {
              inspect_mode ? PUFF_GREEN : LIGHTGRAY);
 
     EndDrawing();
+    maybe_save_render_frame();
 }
