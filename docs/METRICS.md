@@ -33,10 +33,10 @@ Use these to separate yaw spin from roll/pitch oscillation.
 - `max_abs_action`: Maximum absolute raw policy action seen in the episode.
 - `action_saturation_frac`: Fraction of raw policy action values with
   `abs(action) >= 0.99`.
-- `motor_clip_low_frac`: Fraction of motor commands whose effective scaled action
-  hits `-1.0` after env clamp and `action_scale`.
-- `motor_clip_high_frac`: Fraction of motor commands whose effective scaled action
-  hits `+1.0` after env clamp and `action_scale`.
+- `motor_clip_low_frac`: Fraction of motor thrust targets at or below zero after
+  `target_thrust = hover_trim * (1 + action_scale * clipped_action)`.
+- `motor_clip_high_frac`: Fraction of motor thrust targets at or above the
+  configured max motor thrust after the same hover-trim mapping.
 
 `action_saturation_frac` can be high while `motor_clip_high_frac` is zero when
 `action_scale` is small. That means the policy is pushing against the action

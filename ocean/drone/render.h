@@ -575,7 +575,7 @@ void c_render(DroneEnv* env) {
         } else if (client->use_3d_model && client->model_loaded) {
             DrawDroneModel(client, agent, i, dt, body_color);
         } else {
-            DrawDronePrimitive(client, agent, &env->actions[4 * i], body_color);
+            DrawDronePrimitive(client, agent, agent->last_action, body_color);
         }
 
         // Velocity vector

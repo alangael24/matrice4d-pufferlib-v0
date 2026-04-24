@@ -147,8 +147,14 @@ def main() -> int:
     if "> env->oob_radius" not in drone_h_text:
         raise AssertionError("OOB check is not using env.oob_radius")
     dronelib_text = DRONELIB.read_text(encoding="utf-8", errors="replace")
-    if "actions[i] * params->action_scale" not in dronelib_text:
-        raise AssertionError("actions are not scaled around hover trim")
+    if "drone->raw_action[i] = raw_action;" not in dronelib_text:
+        raise AssertionError("raw policy actions are not recorded before env clamp")
+    if "drone->last_action[i] = clipped_action;" not in dronelib_text:
+        raise AssertionError("clipped policy actions are not recorded for physics")
+    if "trim[i] * (1.0f + params->action_scale * action)" not in dronelib_text:
+        raise AssertionError("actions are not mapped as scaled thrust around hover trim")
+    if "move_drone(agent, agent->last_action);" not in drone_h_text:
+        raise AssertionError("physics is not using the clipped action buffer")
 
     print("Matrice 4D V0 checks passed")
     print("motor_order:", motor_order)

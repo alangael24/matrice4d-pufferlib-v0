@@ -67,7 +67,7 @@ void init(DroneEnv* env) {
     env->tick = 0;
 }
 
-static inline void record_step_metrics(Drone* agent, float raw_actions[4], float r_dist,
+static inline void record_step_metrics(Drone* agent, float r_dist,
                                        float r_hover, float r_shaping, float r_omega,
                                        float r_terminal) {
     float action_abs_sum = 0.0f;
@@ -75,17 +75,19 @@ static inline void record_step_metrics(Drone* agent, float raw_actions[4], float
     float action_saturation_count = 0.0f;
     float motor_clip_low_count = 0.0f;
     float motor_clip_high_count = 0.0f;
+    float trim[4];
+    hover_trim_thrusts(&agent->params, trim);
+    float max_thrust = max_motor_thrust(&agent->params);
 
     for (int i = 0; i < 4; i++) {
-        float abs_action = fabsf(raw_actions[i]);
+        float abs_action = fabsf(agent->raw_action[i]);
         action_abs_sum += abs_action;
         if (abs_action > action_max_abs) action_max_abs = abs_action;
         if (abs_action >= 0.99f) action_saturation_count += 1.0f;
 
-        float env_clipped = clampf(raw_actions[i], -1.0f, 1.0f);
-        float motor_action = clampf(env_clipped * agent->params.action_scale, -1.0f, 1.0f);
-        if (motor_action <= -0.99f) motor_clip_low_count += 1.0f;
-        if (motor_action >= 0.99f) motor_clip_high_count += 1.0f;
+        float target_thrust = trim[i] * (1.0f + agent->params.action_scale * agent->last_action[i]);
+        if (target_thrust <= 0.0f) motor_clip_low_count += 1.0f;
+        if (target_thrust >= max_thrust) motor_clip_high_count += 1.0f;
 
         agent->rpm_sum[i] += agent->state.rpms[i];
     }
@@ -168,6 +170,10 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->ema_omega_x = 0.0f;
     agent->ema_omega_y = 0.0f;
     agent->ema_omega_z = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        agent->raw_action[i] = 0.0f;
+        agent->last_action[i] = 0.0f;
+    }
     agent->action_abs_sum = 0.0f;
     agent->action_max_abs = 0.0f;
     agent->action_saturation_count = 0.0f;
@@ -250,13 +256,8 @@ void c_step(DroneEnv* env) {
         Drone* agent = &env->agents[i];
 
         agent->prev_pos = agent->state.pos;
-        float raw_actions[4] = {
-            env->actions[4 * i + 0],
-            env->actions[4 * i + 1],
-            env->actions[4 * i + 2],
-            env->actions[4 * i + 3],
-        };
-        move_drone(agent, &env->actions[4 * i]);
+        set_drone_actions(agent, &env->actions[4 * i]);
+        move_drone(agent, agent->last_action);
         agent->episode_length++;
 
         bool oob = norm3(sub3(agent->target->pos, agent->state.pos)) > env->oob_radius;
@@ -285,7 +286,7 @@ void c_step(DroneEnv* env) {
         agent->ema_omega_x = 0.99f * agent->ema_omega_x + 0.01f * fabsf(agent->state.omega.x);
         agent->ema_omega_y = 0.99f * agent->ema_omega_y + 0.01f * fabsf(agent->state.omega.y);
         agent->ema_omega_z = 0.99f * agent->ema_omega_z + 0.01f * fabsf(agent->state.omega.z);
-        record_step_metrics(agent, raw_actions, r_dist, r_hover, r_shaping, r_omega, r_terminal);
+        record_step_metrics(agent, r_dist, r_hover, r_shaping, r_omega, r_terminal);
         agent->episode_return += reward;
         env->rewards[i] = reward;
 

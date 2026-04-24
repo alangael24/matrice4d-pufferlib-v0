@@ -21,9 +21,12 @@ spin directions are out of scope for V0.
   - `tau_x = sum(y_i * T_i)`
   - `tau_y = sum(-x_i * T_i)`
   - `tau_z = k_drag * sum(yaw_sign_i * T_i)`
+- Raw policy actions are recorded, then explicitly clamped to `[-1, 1]` before
+  they enter the physics.
 - Action `0` maps to hover trim from the CAD allocation matrix.
-- `env.action_scale` scales policy actions around hover trim. `1.0` preserves
-  the full baseline range; `0.2` or `0.3` is intended for easy curriculum runs.
+- `env.action_scale` scales clipped actions around hover trim:
+  `target_thrust = hover_trim_thrust * (1 + action_scale * clipped_action)`.
+  `0.2` or `0.3` is intended for easy curriculum runs.
 - `env.domain_randomization` controls the per-reset physics randomization
   amount. `0.05` is the baseline; `0.0` disables it.
 - Observations remain the PufferLib 23-float drone observation vector, with

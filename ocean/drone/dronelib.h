@@ -187,6 +187,8 @@ typedef struct {
     float ema_dist;
     float ema_vel;
     float ema_omega;
+    float raw_action[4];
+    float last_action[4];
     float ema_omega_x;
     float ema_omega_y;
     float ema_omega_z;
@@ -239,6 +241,15 @@ static inline void clamp4(float a[4], float min, float max) {
     a[1] = clampf(a[1], min, max);
     a[2] = clampf(a[2], min, max);
     a[3] = clampf(a[3], min, max);
+}
+
+static inline void set_drone_actions(Drone* drone, const float* actions) {
+    for (int i = 0; i < 4; i++) {
+        float raw_action = actions[i];
+        float clipped_action = clampf(raw_action, -1.0f, 1.0f);
+        drone->raw_action[i] = raw_action;
+        drone->last_action[i] = clipped_action;
+    }
 }
 
 static inline Quat quat_mul(Quat q1, Quat q2) {
@@ -423,13 +434,10 @@ static inline void compute_derivatives(State* state, Params* params, float* acti
                                        StateDerivative* derivatives) {
     float trim[4];
     hover_trim_thrusts(params, trim);
-    float max_thrust = max_motor_thrust(params);
     float target_rpms[4];
     for (int i = 0; i < 4; i++) {
-        float action = clampf(actions[i] * params->action_scale, -1.0f, 1.0f);
-        float target_thrust = action >= 0.0f
-            ? trim[i] + action * (max_thrust - trim[i])
-            : trim[i] + action * trim[i];
+        float action = clampf(actions[i], -1.0f, 1.0f);
+        float target_thrust = trim[i] * (1.0f + params->action_scale * action);
         target_rpms[i] = thrust_to_rpm(params, target_thrust);
     }
 
@@ -572,10 +580,13 @@ static inline void rk4_step(State* state, Params* params, float* actions, float 
 }
 
 static inline void move_drone(Drone* drone, float* actions) {
-    clamp4(actions, -1.0f, 1.0f);
+    float clipped_actions[4];
+    for (int i = 0; i < 4; i++) {
+        clipped_actions[i] = clampf(actions[i], -1.0f, 1.0f);
+    }
 
     for (int s = 0; s < ACTION_SUBSTEPS; s++) {
-        rk4_step(&drone->state, &drone->params, actions, DT);
+        rk4_step(&drone->state, &drone->params, clipped_actions, DT);
 
         clamp3(&drone->state.vel, -drone->params.max_vel, drone->params.max_vel);
         clamp3(&drone->state.omega, -drone->params.max_omega, drone->params.max_omega);
