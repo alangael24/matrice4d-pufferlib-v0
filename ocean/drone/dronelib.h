@@ -81,6 +81,23 @@ struct Log {
     float ema_dist;
     float ema_vel;
     float ema_omega;
+    float ema_omega_x;
+    float ema_omega_y;
+    float ema_omega_z;
+    float mean_abs_action;
+    float max_abs_action;
+    float action_saturation_frac;
+    float motor_clip_low_frac;
+    float motor_clip_high_frac;
+    float mean_rpm_FL;
+    float mean_rpm_FR;
+    float mean_rpm_RL;
+    float mean_rpm_RR;
+    float r_dist;
+    float r_hover;
+    float r_shaping;
+    float r_omega;
+    float r_terminal;
     float n;
 };
 
@@ -170,6 +187,21 @@ typedef struct {
     float ema_dist;
     float ema_vel;
     float ema_omega;
+    float ema_omega_x;
+    float ema_omega_y;
+    float ema_omega_z;
+    float action_abs_sum;
+    float action_max_abs;
+    float action_saturation_count;
+    float motor_clip_low_count;
+    float motor_clip_high_count;
+    float rpm_sum[4];
+    float instrumentation_steps;
+    float r_dist_sum;
+    float r_hover_sum;
+    float r_shaping_sum;
+    float r_omega_sum;
+    float r_terminal_sum;
 } Drone;
 
 static inline float clampf(float v, float min, float max) {
