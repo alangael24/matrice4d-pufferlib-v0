@@ -43,6 +43,7 @@ struct DroneEnv {
 
     // hover task parameters
     float hover_target_dist;
+    float oob_radius;
     float hover_dist;
     float hover_omega;
     float hover_vel;
@@ -258,7 +259,7 @@ void c_step(DroneEnv* env) {
         move_drone(agent, &env->actions[4 * i]);
         agent->episode_length++;
 
-        bool oob = norm3(sub3(agent->target->pos, agent->state.pos)) > (env->hover_target_dist + 1.0f);
+        bool oob = norm3(sub3(agent->target->pos, agent->state.pos)) > env->oob_radius;
         bool timeout = (agent->episode_length >= HORIZON);
 
         float curr = hover_potential(agent, env->hover_dist, env->hover_omega, env->hover_vel);

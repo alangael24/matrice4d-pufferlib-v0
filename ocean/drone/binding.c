@@ -18,6 +18,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->alpha_shaping = dict_get(kwargs, "alpha_shaping")->value;
     env->alpha_omega = dict_get(kwargs, "alpha_omega")->value;
     env->hover_target_dist = dict_get(kwargs, "hover_target_dist")->value;
+    env->oob_radius = dict_get(kwargs, "oob_radius")->value;
     env->hover_dist = dict_get(kwargs, "hover_dist")->value;
     env->hover_omega = dict_get(kwargs, "hover_omega")->value;
     env->hover_vel = dict_get(kwargs, "hover_vel")->value;
