@@ -138,6 +138,78 @@ def parse_metadata_value(value: str) -> Any:
     return parsed
 
 
+def latest_puffer_log_config(run_dir: Path) -> dict[str, Any]:
+    log_files = sorted(
+        run_dir.glob("logs/**/*.json"),
+        key=lambda path: path.stat().st_mtime,
+    )
+    if not log_files:
+        return {}
+
+    try:
+        payload = json.loads(log_files[-1].read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+
+    env = payload.get("env", {}) if isinstance(payload.get("env"), dict) else {}
+    train = payload.get("train", {}) if isinstance(payload.get("train"), dict) else {}
+    policy = payload.get("policy", {}) if isinstance(payload.get("policy"), dict) else {}
+
+    return {
+        "seed": payload.get("seed", train.get("seed")),
+        "timesteps": train.get("total_timesteps"),
+        "target_dist": env.get("hover_target_dist"),
+        "action_scale": env.get("action_scale"),
+        "domain_randomization": env.get("domain_randomization"),
+        "reset_yaw_range": env.get("reset_yaw_range"),
+        "reset_vel_max": env.get("reset_vel_max"),
+        "reset_pos_scale": env.get("reset_pos_scale"),
+        "policy_num_layers": policy.get("num_layers"),
+        "checkpoint_interval": payload.get("checkpoint_interval"),
+        "checkpoint_dir": payload.get("checkpoint_dir"),
+        "log_dir": payload.get("log_dir"),
+        "tag": payload.get("tag"),
+    }
+
+
+def command_from_log_config(config: dict[str, Any]) -> str:
+    required = [
+        "tag",
+        "checkpoint_dir",
+        "log_dir",
+        "checkpoint_interval",
+        "seed",
+        "timesteps",
+        "target_dist",
+        "domain_randomization",
+        "action_scale",
+        "reset_yaw_range",
+        "reset_vel_max",
+        "reset_pos_scale",
+        "policy_num_layers",
+    ]
+    if any(config.get(key) is None for key in required):
+        return ""
+
+    return (
+        "CUDA_VISIBLE_DEVICES=0 puffer train drone "
+        f"--tag {config['tag']} "
+        f"--checkpoint-dir {config['checkpoint_dir']} "
+        f"--log-dir {config['log_dir']} "
+        f"--checkpoint-interval {config['checkpoint_interval']} "
+        f"--seed {config['seed']} "
+        f"--train.seed {config['seed']} "
+        f"--train.total-timesteps {config['timesteps']} "
+        f"--env.hover-target-dist {config['target_dist']} "
+        f"--env.domain-randomization {config['domain_randomization']} "
+        f"--env.action-scale {config['action_scale']} "
+        f"--env.reset-yaw-range {config['reset_yaw_range']} "
+        f"--env.reset-vel-max {config['reset_vel_max']} "
+        f"--env.reset-pos-scale {config['reset_pos_scale']} "
+        f"--policy.num-layers {config['policy_num_layers']}"
+    )
+
+
 def parse_stdout(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="replace")
     clean = re.sub(r"[^\x20-\x7E\n\r\t]", " ", text)
@@ -185,10 +257,17 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                 key, value = line.split("=", 1)
                 metadata[key] = parse_metadata_value(value)
 
+    log_config = latest_puffer_log_config(run_dir)
+    for key, value in log_config.items():
+        if value is not None and key not in metadata:
+            metadata[key] = value
+
     command = ""
     command_path = run_dir / "command.sh"
     if command_path.exists():
         command = command_path.read_text(encoding="utf-8", errors="replace").strip()
+    if not command:
+        command = command_from_log_config(log_config)
 
     checkpoints = checkpoint_files(run_dir)
     return {
