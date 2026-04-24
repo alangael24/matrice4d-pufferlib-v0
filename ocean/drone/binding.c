@@ -42,4 +42,21 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "ema_dist", log->ema_dist);
     dict_set(out, "ema_vel", log->ema_vel);
     dict_set(out, "ema_omega", log->ema_omega);
+    dict_set(out, "ema_omega_x", log->ema_omega_x);
+    dict_set(out, "ema_omega_y", log->ema_omega_y);
+    dict_set(out, "ema_omega_z", log->ema_omega_z);
+    dict_set(out, "mean_abs_action", log->mean_abs_action);
+    dict_set(out, "max_abs_action", log->max_abs_action);
+    dict_set(out, "action_saturation_frac", log->action_saturation_frac);
+    dict_set(out, "motor_clip_low_frac", log->motor_clip_low_frac);
+    dict_set(out, "motor_clip_high_frac", log->motor_clip_high_frac);
+    dict_set(out, "mean_rpm_FL", log->mean_rpm_FL);
+    dict_set(out, "mean_rpm_FR", log->mean_rpm_FR);
+    dict_set(out, "mean_rpm_RL", log->mean_rpm_RL);
+    dict_set(out, "mean_rpm_RR", log->mean_rpm_RR);
+    dict_set(out, "r_dist", log->r_dist);
+    dict_set(out, "r_hover", log->r_hover);
+    dict_set(out, "r_shaping", log->r_shaping);
+    dict_set(out, "r_omega", log->r_omega);
+    dict_set(out, "r_terminal", log->r_terminal);
 }
