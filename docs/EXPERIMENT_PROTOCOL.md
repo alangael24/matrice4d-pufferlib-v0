@@ -34,6 +34,24 @@ The batch includes:
 3. Target 2 m seeds 42-46.
 4. Target 5 m action-scale sweep: 0.2, 0.3, 0.4, 0.5.
 
+Phase A and Phase B must not share reset settings:
+
+```text
+Phase A close-hover:
+hover_target_dist = 0.5
+reset_pos_scale = 0
+reset_yaw_range = 0
+reset_vel_max = 0
+action_scale = 0.2
+
+Phase B hard resets:
+hover_target_dist = 2 or 5
+reset_pos_scale = 1.0
+reset_yaw_range = 3.14159
+reset_vel_max = 0.2
+action_scale = 0.2 for target 2 m; sweep for target 5 m
+```
+
 ## Artifact Contract
 
 Each important run must preserve:

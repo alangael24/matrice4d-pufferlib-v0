@@ -42,6 +42,27 @@ artifacts/<batch_id>.tgz.sha256
 
 Download that `.tgz` from the GPU before destroying the instance.
 
+## Phase Split
+
+Phase A is the easy close-hover baseline and uses no reset randomization:
+
+```text
+hover_target_dist = 0.5
+reset_pos_scale = 0
+reset_yaw_range = 0
+reset_vel_max = 0
+action_scale = 0.2
+```
+
+Phase B is for harder reset distributions:
+
+```text
+hover_target_dist = 2 or 5
+reset_pos_scale = 1.0
+reset_yaw_range = 3.14159
+reset_vel_max = 0.2
+```
+
 ## Useful Overrides
 
 For a smoke pass:

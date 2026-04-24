@@ -139,7 +139,7 @@ run_experiment() {
   fi
 }
 
-# 1. Checkpoint smoke test
+# 1. Checkpoint smoke test, using the same nominal reset as Phase A.
 run_experiment \
   "checkpoint_test_seed46_target05_scale02" \
   "$CHECKPOINT_TEST_TIMESTEPS" \
@@ -149,9 +149,9 @@ run_experiment \
   0 \
   0 \
   0 \
-  1.0
+  0
 
-# 2. Phase A close-hover baseline candidate
+# 2. Phase A: real close-hover baseline, no reset randomization.
 run_experiment \
   "phaseA_close_seed46_30m" \
   "$TOTAL_TIMESTEPS_PHASEA" \
@@ -161,9 +161,9 @@ run_experiment \
   0 \
   0 \
   0 \
-  1.0
+  0
 
-# 3. Target 2 m seeds 42-46 with Phase B reset variation
+# 3. Phase B: target 2 m seeds 42-46 with hard reset variation.
 for seed in 42 43 44 45 46; do
   run_experiment \
     "target2m_seed${seed}_30m" \
@@ -177,7 +177,7 @@ for seed in 42 43 44 45 46; do
     1.0
 done
 
-# 4. Target 5 m action-scale sweep
+# 4. Phase B: target 5 m action-scale sweep with hard reset variation.
 for action_scale in 0.2 0.3 0.4 0.5; do
   safe_scale="${action_scale/./}"
   run_experiment \
