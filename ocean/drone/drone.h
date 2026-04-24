@@ -48,6 +48,9 @@ struct DroneEnv {
     float hover_vel;
     float domain_randomization;
     float action_scale;
+    float reset_pos_scale;
+    float reset_yaw_range;
+    float reset_vel_max;
 };
 
 void init(DroneEnv* env) {
@@ -113,13 +116,36 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     init_drone(agent, &env->rng, env->domain_randomization);
     agent->params.action_scale = env->action_scale;
 
-    agent->state.pos =
-        (Vec3){rndf(-MARGIN_X, MARGIN_X, &env->rng), rndf(-MARGIN_Y, MARGIN_Y, &env->rng), rndf(-MARGIN_Z, MARGIN_Z, &env->rng)};
+    float pos_scale = clampf(env->reset_pos_scale, 0.0f, 1.0f);
+    agent->state.pos = (Vec3){
+        rndf(-MARGIN_X * pos_scale, MARGIN_X * pos_scale, &env->rng),
+        rndf(-MARGIN_Y * pos_scale, MARGIN_Y * pos_scale, &env->rng),
+        rndf(-MARGIN_Z * pos_scale, MARGIN_Z * pos_scale, &env->rng)
+    };
+
+    if (env->reset_yaw_range > 0.0f) {
+        float yaw = rndf(-env->reset_yaw_range, env->reset_yaw_range, &env->rng);
+        agent->state.quat = quat_from_axis_angle((Vec3){0.0f, 0.0f, 1.0f}, yaw);
+    }
+
+    if (env->reset_vel_max > 0.0f) {
+        float u = rndf(0.0f, 1.0f, &env->rng);
+        float v = rndf(0.0f, 1.0f, &env->rng);
+        float z = 2.0f * v - 1.0f;
+        float a = 2.0f * (float)M_PI * u;
+        float r_xy = sqrtf(fmaxf(0.0f, 1.0f - z * z));
+        Vec3 dir = (Vec3){r_xy * cosf(a), r_xy * sinf(a), z};
+        float speed = env->reset_vel_max * cbrtf(rndf(0.0f, 1.0f, &env->rng));
+        agent->state.vel = scalmul3(dir, speed);
+    }
 
     if (env->task == RACE) {
         while (norm3(sub3(agent->state.pos, env->ring_buffer[0].pos)) < 2.0f * RING_RADIUS) {
-            agent->state.pos = (Vec3){rndf(-MARGIN_X, MARGIN_X, &env->rng), rndf(-MARGIN_Y, MARGIN_Y, &env->rng),
-                                      rndf(-MARGIN_Z, MARGIN_Z, &env->rng)};
+            agent->state.pos = (Vec3){
+                rndf(-MARGIN_X * pos_scale, MARGIN_X * pos_scale, &env->rng),
+                rndf(-MARGIN_Y * pos_scale, MARGIN_Y * pos_scale, &env->rng),
+                rndf(-MARGIN_Z * pos_scale, MARGIN_Z * pos_scale, &env->rng)
+            };
         }
     }
 

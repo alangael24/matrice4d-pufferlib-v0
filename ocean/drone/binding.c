@@ -23,6 +23,9 @@ void my_init(Env* env, Dict* kwargs) {
     env->hover_vel = dict_get(kwargs, "hover_vel")->value;
     env->domain_randomization = dict_get(kwargs, "domain_randomization")->value;
     env->action_scale = dict_get(kwargs, "action_scale")->value;
+    env->reset_pos_scale = dict_get(kwargs, "reset_pos_scale")->value;
+    env->reset_yaw_range = dict_get(kwargs, "reset_yaw_range")->value;
+    env->reset_vel_max = dict_get(kwargs, "reset_vel_max")->value;
     init(env);
 }
 

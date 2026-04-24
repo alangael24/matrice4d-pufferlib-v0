@@ -82,7 +82,15 @@ class NativeMinGRUPolicy(torch.nn.Module):
         return actions.contiguous(), torch.stack(next_layers, dim=0)
 
 
-def make_args(num_drones, hover_target_dist, action_scale, domain_randomization):
+def make_args(
+    num_drones,
+    hover_target_dist,
+    action_scale,
+    domain_randomization,
+    reset_pos_scale=1.0,
+    reset_yaw_range=0.0,
+    reset_vel_max=0.0,
+):
     return {
         "env_name": "drone",
         "vec": {
@@ -104,6 +112,9 @@ def make_args(num_drones, hover_target_dist, action_scale, domain_randomization)
             "hover_vel": 0.1,
             "domain_randomization": domain_randomization,
             "action_scale": action_scale,
+            "reset_pos_scale": reset_pos_scale,
+            "reset_yaw_range": reset_yaw_range,
+            "reset_vel_max": reset_vel_max,
         },
     }
 
@@ -115,6 +126,9 @@ def main():
     parser.add_argument("--hover-target-dist", type=float, default=0.5)
     parser.add_argument("--domain-randomization", type=float, default=0.0)
     parser.add_argument("--action-scale", type=float, default=0.2)
+    parser.add_argument("--reset-pos-scale", type=float, default=1.0)
+    parser.add_argument("--reset-yaw-range", type=float, default=0.0)
+    parser.add_argument("--reset-vel-max", type=float, default=0.0)
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--fps", type=float, default=60.0)
@@ -132,7 +146,15 @@ def main():
         raise RuntimeError(f"pufferlib._C is built for {_C.env_name}, not drone. Run: bash build.sh drone --cpu")
 
     vec = _C.create_vec(
-        make_args(args.num_drones, args.hover_target_dist, args.action_scale, args.domain_randomization),
+        make_args(
+            args.num_drones,
+            args.hover_target_dist,
+            args.action_scale,
+            args.domain_randomization,
+            args.reset_pos_scale,
+            args.reset_yaw_range,
+            args.reset_vel_max,
+        ),
         0,
     )
     policy = NativeMinGRUPolicy(checkpoint, hidden_size=args.hidden_size, num_layers=args.num_layers)
