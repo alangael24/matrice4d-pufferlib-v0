@@ -70,9 +70,13 @@ void init(DroneEnv* env) {
 static inline void record_step_metrics(Drone* agent, float r_dist,
                                        float r_hover, float r_shaping, float r_omega,
                                        float r_terminal) {
-    float action_abs_sum = 0.0f;
-    float action_max_abs = 0.0f;
-    float action_saturation_count = 0.0f;
+    float raw_action_abs_sum = 0.0f;
+    float raw_action_max_abs = 0.0f;
+    float raw_action_saturation_count = 0.0f;
+    float raw_action_clip_count = 0.0f;
+    float clipped_action_abs_sum = 0.0f;
+    float clipped_action_max_abs = 0.0f;
+    float clipped_action_saturation_count = 0.0f;
     float motor_clip_low_count = 0.0f;
     float motor_clip_high_count = 0.0f;
     float trim[4];
@@ -81,9 +85,17 @@ static inline void record_step_metrics(Drone* agent, float r_dist,
 
     for (int i = 0; i < 4; i++) {
         float abs_action = fabsf(agent->raw_action[i]);
-        action_abs_sum += abs_action;
-        if (abs_action > action_max_abs) action_max_abs = abs_action;
-        if (abs_action >= 0.99f) action_saturation_count += 1.0f;
+        raw_action_abs_sum += abs_action;
+        if (abs_action > raw_action_max_abs) raw_action_max_abs = abs_action;
+        if (abs_action >= 0.99f) raw_action_saturation_count += 1.0f;
+        if (agent->raw_action[i] < -1.0f || agent->raw_action[i] > 1.0f) {
+            raw_action_clip_count += 1.0f;
+        }
+
+        float clipped_abs_action = fabsf(agent->last_action[i]);
+        clipped_action_abs_sum += clipped_abs_action;
+        if (clipped_abs_action > clipped_action_max_abs) clipped_action_max_abs = clipped_abs_action;
+        if (clipped_abs_action >= 0.99f) clipped_action_saturation_count += 1.0f;
 
         float target_thrust = trim[i] * (1.0f + agent->params.action_scale * agent->last_action[i]);
         if (target_thrust <= 0.0f) motor_clip_low_count += 1.0f;
@@ -92,9 +104,17 @@ static inline void record_step_metrics(Drone* agent, float r_dist,
         agent->rpm_sum[i] += agent->state.rpms[i];
     }
 
-    agent->action_abs_sum += action_abs_sum / 4.0f;
-    if (action_max_abs > agent->action_max_abs) agent->action_max_abs = action_max_abs;
-    agent->action_saturation_count += action_saturation_count / 4.0f;
+    agent->raw_action_abs_sum += raw_action_abs_sum / 4.0f;
+    if (raw_action_max_abs > agent->raw_action_max_abs) {
+        agent->raw_action_max_abs = raw_action_max_abs;
+    }
+    agent->raw_action_saturation_count += raw_action_saturation_count / 4.0f;
+    agent->raw_action_clip_count += raw_action_clip_count / 4.0f;
+    agent->clipped_action_abs_sum += clipped_action_abs_sum / 4.0f;
+    if (clipped_action_max_abs > agent->clipped_action_max_abs) {
+        agent->clipped_action_max_abs = clipped_action_max_abs;
+    }
+    agent->clipped_action_saturation_count += clipped_action_saturation_count / 4.0f;
     agent->motor_clip_low_count += motor_clip_low_count / 4.0f;
     agent->motor_clip_high_count += motor_clip_high_count / 4.0f;
     agent->instrumentation_steps += 1.0f;
@@ -126,9 +146,15 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     env->log.ema_omega_x += agent->ema_omega_x;
     env->log.ema_omega_y += agent->ema_omega_y;
     env->log.ema_omega_z += agent->ema_omega_z;
-    env->log.mean_abs_action += agent->action_abs_sum / steps;
-    env->log.max_abs_action += agent->action_max_abs;
-    env->log.action_saturation_frac += agent->action_saturation_count / steps;
+    env->log.mean_abs_action += agent->raw_action_abs_sum / steps;
+    env->log.max_abs_action += agent->raw_action_max_abs;
+    env->log.action_saturation_frac += agent->raw_action_saturation_count / steps;
+    env->log.mean_abs_action_raw += agent->raw_action_abs_sum / steps;
+    env->log.max_abs_action_raw += agent->raw_action_max_abs;
+    env->log.raw_action_clip_frac += agent->raw_action_clip_count / steps;
+    env->log.mean_abs_action_clipped += agent->clipped_action_abs_sum / steps;
+    env->log.max_abs_action_clipped += agent->clipped_action_max_abs;
+    env->log.clipped_action_saturation_frac += agent->clipped_action_saturation_count / steps;
     env->log.motor_clip_low_frac += agent->motor_clip_low_count / steps;
     env->log.motor_clip_high_frac += agent->motor_clip_high_count / steps;
     env->log.mean_rpm_FL += agent->rpm_sum[0] / steps;
@@ -174,9 +200,13 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
         agent->raw_action[i] = 0.0f;
         agent->last_action[i] = 0.0f;
     }
-    agent->action_abs_sum = 0.0f;
-    agent->action_max_abs = 0.0f;
-    agent->action_saturation_count = 0.0f;
+    agent->raw_action_abs_sum = 0.0f;
+    agent->raw_action_max_abs = 0.0f;
+    agent->raw_action_saturation_count = 0.0f;
+    agent->raw_action_clip_count = 0.0f;
+    agent->clipped_action_abs_sum = 0.0f;
+    agent->clipped_action_max_abs = 0.0f;
+    agent->clipped_action_saturation_count = 0.0f;
     agent->motor_clip_low_count = 0.0f;
     agent->motor_clip_high_count = 0.0f;
     for (int i = 0; i < 4; i++) agent->rpm_sum[i] = 0.0f;

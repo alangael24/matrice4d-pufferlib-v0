@@ -29,18 +29,28 @@ Use these to separate yaw spin from roll/pitch oscillation.
 
 ## Actions And Saturation
 
-- `mean_abs_action`: Mean absolute raw policy action before the environment clamp.
-- `max_abs_action`: Maximum absolute raw policy action seen in the episode.
-- `action_saturation_frac`: Fraction of raw policy action values with
-  `abs(action) >= 0.99`.
+- `mean_abs_action`: Legacy alias for `mean_abs_action_raw`.
+- `max_abs_action`: Legacy alias for `max_abs_action_raw`.
+- `action_saturation_frac`: Legacy diagnostic alias for raw policy action values
+  with `abs(action) >= 0.99`. This is not necessarily env clipping.
+- `mean_abs_action_raw`: Mean absolute raw policy action before env clamp.
+- `max_abs_action_raw`: Maximum absolute raw policy action before env clamp.
+- `raw_action_clip_frac`: Fraction of raw policy actions outside `[-1, 1]`.
+  This is true env action clipping.
+- `mean_abs_action_clipped`: Mean absolute action after the env clamp.
+- `max_abs_action_clipped`: Maximum absolute action after the env clamp.
+- `clipped_action_saturation_frac`: Fraction of clipped actions with
+  `abs(clipped_action) >= 0.99`.
 - `motor_clip_low_frac`: Fraction of motor thrust targets at or below zero after
   `target_thrust = hover_trim * (1 + action_scale * clipped_action)`.
 - `motor_clip_high_frac`: Fraction of motor thrust targets at or above the
   configured max motor thrust after the same hover-trim mapping.
 
-`action_saturation_frac` can be high while `motor_clip_high_frac` is zero when
-`action_scale` is small. That means the policy is pushing against the action
-interface, but the motor target is still limited by the curriculum scale.
+Use `raw_action_clip_frac` to detect real env clipping. Use
+`action_saturation_frac` and `clipped_action_saturation_frac` to detect whether
+the policy is pushing against the action boundary. `motor_clip_high_frac` can
+remain zero when `action_scale` is small because the hover-trim mapping still
+keeps motor thrust targets inside the physical range.
 
 ## Motors
 

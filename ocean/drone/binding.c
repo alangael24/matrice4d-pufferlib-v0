@@ -49,6 +49,12 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "mean_abs_action", log->mean_abs_action);
     dict_set(out, "max_abs_action", log->max_abs_action);
     dict_set(out, "action_saturation_frac", log->action_saturation_frac);
+    dict_set(out, "mean_abs_action_raw", log->mean_abs_action_raw);
+    dict_set(out, "max_abs_action_raw", log->max_abs_action_raw);
+    dict_set(out, "raw_action_clip_frac", log->raw_action_clip_frac);
+    dict_set(out, "mean_abs_action_clipped", log->mean_abs_action_clipped);
+    dict_set(out, "max_abs_action_clipped", log->max_abs_action_clipped);
+    dict_set(out, "clipped_action_saturation_frac", log->clipped_action_saturation_frac);
     dict_set(out, "motor_clip_low_frac", log->motor_clip_low_frac);
     dict_set(out, "motor_clip_high_frac", log->motor_clip_high_frac);
     dict_set(out, "mean_rpm_FL", log->mean_rpm_FL);

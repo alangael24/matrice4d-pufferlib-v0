@@ -28,6 +28,29 @@ METRIC_KEYS = [
     "ema_dist",
     "ema_vel",
     "ema_omega",
+    "ema_omega_x",
+    "ema_omega_y",
+    "ema_omega_z",
+    "mean_abs_action",
+    "max_abs_action",
+    "action_saturation_frac",
+    "mean_abs_action_raw",
+    "max_abs_action_raw",
+    "raw_action_clip_frac",
+    "mean_abs_action_clipped",
+    "max_abs_action_clipped",
+    "clipped_action_saturation_frac",
+    "motor_clip_low_frac",
+    "motor_clip_high_frac",
+    "mean_rpm_FL",
+    "mean_rpm_FR",
+    "mean_rpm_RL",
+    "mean_rpm_RR",
+    "r_dist",
+    "r_hover",
+    "r_shaping",
+    "r_omega",
+    "r_terminal",
 ]
 
 LOSS_KEYS = ["policy", "value", "entropy", "total", "old_kl", "kl", "clipfrac"]
@@ -48,9 +71,10 @@ def parse_numeric(value: str) -> float | int | str:
 
 def read_metric(text: str, key: str, word: bool = False) -> Any:
     token = r"[A-Za-z][A-Za-z0-9_-]*" if word else r"-?\d+(?:\.\d+)?(?:[KMB])?"
-    match = re.search(rf"(?:^|\s){re.escape(key)}\s+({token})(?=\s|$)", text, flags=re.IGNORECASE)
-    if not match:
+    matches = list(re.finditer(rf"(?:^|\s){re.escape(key)}\s+({token})(?=\s|$)", text, flags=re.IGNORECASE))
+    if not matches:
         return None
+    match = matches[-1]
     return match.group(1) if word else parse_numeric(match.group(1))
 
 
@@ -141,6 +165,17 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "ema_dist",
         "ema_vel",
         "ema_omega",
+        "ema_omega_x",
+        "ema_omega_y",
+        "ema_omega_z",
+        "mean_abs_action_raw",
+        "max_abs_action_raw",
+        "raw_action_clip_frac",
+        "mean_abs_action_clipped",
+        "max_abs_action_clipped",
+        "clipped_action_saturation_frac",
+        "motor_clip_low_frac",
+        "motor_clip_high_frac",
         "checkpoint_count",
         "latest_checkpoint_bytes",
         "latest_checkpoint_path",
@@ -166,6 +201,17 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 "ema_dist": metrics.get("ema_dist"),
                 "ema_vel": metrics.get("ema_vel"),
                 "ema_omega": metrics.get("ema_omega"),
+                "ema_omega_x": metrics.get("ema_omega_x"),
+                "ema_omega_y": metrics.get("ema_omega_y"),
+                "ema_omega_z": metrics.get("ema_omega_z"),
+                "mean_abs_action_raw": metrics.get("mean_abs_action_raw"),
+                "max_abs_action_raw": metrics.get("max_abs_action_raw"),
+                "raw_action_clip_frac": metrics.get("raw_action_clip_frac"),
+                "mean_abs_action_clipped": metrics.get("mean_abs_action_clipped"),
+                "max_abs_action_clipped": metrics.get("max_abs_action_clipped"),
+                "clipped_action_saturation_frac": metrics.get("clipped_action_saturation_frac"),
+                "motor_clip_low_frac": metrics.get("motor_clip_low_frac"),
+                "motor_clip_high_frac": metrics.get("motor_clip_high_frac"),
                 "checkpoint_count": row.get("checkpoint_count"),
                 "latest_checkpoint_bytes": latest.get("bytes"),
                 "latest_checkpoint_path": latest.get("path"),

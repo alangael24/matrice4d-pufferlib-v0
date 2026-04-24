@@ -155,6 +155,16 @@ def main() -> int:
         raise AssertionError("actions are not mapped as scaled thrust around hover trim")
     if "move_drone(agent, agent->last_action);" not in drone_h_text:
         raise AssertionError("physics is not using the clipped action buffer")
+    for metric in [
+        "mean_abs_action_raw",
+        "max_abs_action_raw",
+        "raw_action_clip_frac",
+        "mean_abs_action_clipped",
+        "max_abs_action_clipped",
+        "clipped_action_saturation_frac",
+    ]:
+        if f'dict_set(out, "{metric}", log->{metric});' not in binding_text:
+            raise AssertionError(f"{metric} is not exposed through binding.c")
 
     print("Matrice 4D V0 checks passed")
     print("motor_order:", motor_order)
