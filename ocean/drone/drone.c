@@ -43,6 +43,7 @@ int main() {
     env->alpha_omega_xy = 0.00135588f;
     env->alpha_omega_z = 0.00135588f;
     env->alpha_omega_z_sq = 0.0025f;
+    env->alpha_omega_z_mult = 1.0f;
     env->hover_target_dist = 5.0f;
     env->oob_radius = 12.0f;
     env->hover_dist = 0.1f;

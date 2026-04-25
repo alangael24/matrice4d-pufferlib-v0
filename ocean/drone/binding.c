@@ -20,6 +20,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->alpha_omega_xy = dict_get(kwargs, "alpha_omega_xy")->value;
     env->alpha_omega_z = dict_get(kwargs, "alpha_omega_z")->value;
     env->alpha_omega_z_sq = dict_get(kwargs, "alpha_omega_z_sq")->value;
+    env->alpha_omega_z_mult = dict_get(kwargs, "alpha_omega_z_mult")->value;
     env->hover_target_dist = dict_get(kwargs, "hover_target_dist")->value;
     env->oob_radius = dict_get(kwargs, "oob_radius")->value;
     env->hover_dist = dict_get(kwargs, "hover_dist")->value;

@@ -43,6 +43,7 @@ struct DroneEnv {
     float alpha_omega_xy;
     float alpha_omega_z;
     float alpha_omega_z_sq;
+    float alpha_omega_z_mult;
 
     // hover task parameters
     float hover_target_dist;
@@ -281,7 +282,7 @@ void c_step(DroneEnv* env) {
         float omega_z_abs = fabsf(omega_z);
         float r_omega_xy = -env->alpha_omega_xy * omega_xy;
         float r_omega_z = -env->alpha_omega_z * omega_z_abs
-                        - env->alpha_omega_z_sq * omega_z * omega_z;
+                        - env->alpha_omega_z_sq * env->alpha_omega_z_mult * omega_z * omega_z;
 
         // Branch goal: penalize yaw spin without destroying translational navigation.
         float r_dist = env->alpha_dist * (prev_dist - curr_dist);
