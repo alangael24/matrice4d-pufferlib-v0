@@ -83,6 +83,15 @@ def sample_logits(logits, action=None):
 
     return action.T, logprob.sum(0), logits_entropy
 
+def deterministic_action(logits):
+    if isinstance(logits, torch.distributions.Normal):
+        batch = logits.loc.shape[0]
+        return logits.loc.view(batch, -1)
+    elif isinstance(logits, torch.Tensor):
+        return logits.argmax(dim=-1).int()
+
+    return torch.stack([head.argmax(dim=1) for head in logits], dim=1).int()
+
 class _CudaPtr:
     '''Wraps a raw CUDA pointer so torch.as_tensor can consume it via
     __cuda_array_interface__ without any copy or C++ torch dependency.'''
@@ -214,7 +223,10 @@ class PuffeRL:
             prof.mark(1)
             with torch.no_grad():
                 logits, value, state = self.policy.forward_eval(o_device, self.state)
-                action, logprob, _ = sample_logits(logits)
+                if self.args.get('deterministic_eval'):
+                    action, logprob, _ = sample_logits(logits, deterministic_action(logits))
+                else:
+                    action, logprob, _ = sample_logits(logits)
             prof.mark(2)
 
             with torch.no_grad():

@@ -155,8 +155,16 @@ dmypy.json
 *.gb
 
 checkpoints/
-experiments/
+logs/
+runs/
+artifacts/
 wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.tgz
+*.tar.gz
 .neptune/
 raylib*/
 box2d*/

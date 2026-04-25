@@ -272,6 +272,7 @@ typedef struct {
     float prio_beta0;
     // Flags
     bool reset_state;
+    bool deterministic_eval;
     int cudagraphs;
     bool profile;
     // Multi-GPU
@@ -379,7 +380,8 @@ __global__ void sample_logits(
         precision_t* __restrict__ actions,    // (B, num_atns)
         precision_t* __restrict__ logprobs,   // (B,)
         precision_t* __restrict__ value_out,  // (B,)
-        curandStatePhilox4_32_10_t* __restrict__ rng_states) {
+        curandStatePhilox4_32_10_t* __restrict__ rng_states,
+        bool deterministic) {
     int B = dec_out.shape[0];
     int fused_cols = dec_out.shape[1];
     int num_atns = numel(act_sizes_puf.shape);
@@ -413,9 +415,12 @@ __global__ void sample_logits(
             float log_std = to_float(logstd[logstd_base + h]);
             float std = expf(log_std);
 
-            // Sample from N(0,1) and transform: action = mean + std * noise
-            float noise = curand_normal(&state);
-            float action = mean + std * noise;
+            // Deterministic eval uses the policy mean. Training/eval default samples normally.
+            float action = mean;
+            if (!deterministic) {
+                float noise = curand_normal(&state);
+                action = mean + std * noise;
+            }
 
             // Log probability: -0.5 * ((action - mean) / std)^2 - 0.5 * log(2*pi) - log(std)
             float normalized = (action - mean) / std;
@@ -434,30 +439,35 @@ __global__ void sample_logits(
             // Step 1: Find max and sum for numerical stability (with nan_to_num)
             float max_val = -INFINITY;
             float sum_exp = 0.0f;
+            int greedy_action = 0;
             for (int a = 0; a < A; ++a) {
                 float l = safe_logit(logits, logits_base, logits_offset, a);
                 if (l > max_val) {
                     sum_exp *= expf(max_val - l);
                     max_val = l;
+                    greedy_action = a;
                 }
                 sum_exp += expf(l - max_val);
             }
             float logsumexp = max_val + logf(sum_exp);
 
-            // Step 3: Generate random value for this action head
-            float rand_val = curand_uniform(&state);
+            int sampled_action = greedy_action;
+            if (!deterministic) {
+                // Step 3: Generate random value for this action head
+                float rand_val = curand_uniform(&state);
 
-            // Step 4: Multinomial sampling using inverse CDF
-            float cumsum = 0.0f;
-            int sampled_action = A - 1;  // default to last action
+                // Step 4: Multinomial sampling using inverse CDF
+                float cumsum = 0.0f;
+                sampled_action = A - 1;  // default to last action
 
-            for (int a = 0; a < A; ++a) {
-                float l = safe_logit(logits, logits_base, logits_offset, a);
-                float prob = expf(l - logsumexp);
-                cumsum += prob;
-                if (rand_val < cumsum) {
-                    sampled_action = a;
-                    break;
+                for (int a = 0; a < A; ++a) {
+                    float l = safe_logit(logits, logits_base, logits_offset, a);
+                    float prob = expf(l - logsumexp);
+                    cumsum += prob;
+                    if (rand_val < cumsum) {
+                        sampled_action = a;
+                        break;
+                    }
                 }
             }
 
@@ -494,14 +504,16 @@ extern "C" void net_callback_wrapper(void* ctx, int buf, int t) {
 
     cudaStream_t current_stream = tl_stream;
     if (pufferl->rollout_captured) {
-        cudaGraphLaunch(pufferl->fused_rollout_cudagraphs[graph], current_stream);
+        assert(cudaGraphLaunch(pufferl->fused_rollout_cudagraphs[graph], current_stream) == cudaSuccess
+                && "cudaGraphLaunch failed");
         profile_end(hypers.profile);
         return;
     }
 
     bool capturing = pufferl->epoch == hypers.cudagraphs;
     if (capturing) {
-        cudaStreamBeginCapture(current_stream, cudaStreamCaptureModeGlobal);
+        assert(cudaStreamBeginCapture(current_stream, cudaStreamCaptureModeGlobal) == cudaSuccess
+                && "cudaStreamBeginCapture failed");
     }
 
     RolloutBuf& rollouts = pufferl->rollouts;
@@ -543,7 +555,7 @@ extern "C" void net_callback_wrapper(void* ctx, int buf, int t) {
     sample_logits<<<grid_size(block_size), BLOCK_SIZE, 0, stream>>>(
         dec_puf, p_logstd, pufferl->act_sizes_puf,
         act_slice.data, lp_slice.data, val_slice.data,
-        pufferl->rng_states[buf]);
+        pufferl->rng_states[buf], hypers.deterministic_eval);
 
     // Copy actions to env
     long act_cols = env.actions.shape[1];
@@ -552,9 +564,11 @@ extern "C" void net_callback_wrapper(void* ctx, int buf, int t) {
 
     if (capturing) {
         cudaGraph_t _graph;
-        cudaStreamEndCapture(current_stream, &_graph);
-        cudaGraphInstantiate(&pufferl->fused_rollout_cudagraphs[graph], _graph, 0);
-        cudaGraphDestroy(_graph);
+        assert(cudaStreamEndCapture(current_stream, &_graph) == cudaSuccess
+                && "cudaStreamEndCapture failed");
+        assert(cudaGraphInstantiate(&pufferl->fused_rollout_cudagraphs[graph], _graph, 0) == cudaSuccess
+                && "cudaGraphInstantiate failed");
+        assert(cudaGraphDestroy(_graph) == cudaSuccess && "cudaGraphDestroy failed");
         cudaDeviceSynchronize();
     }
     profile_end(hypers.profile);
@@ -1008,39 +1022,41 @@ __global__ void compute_prio_imp_weights(
     }
 }
 
-// Multinomial with replacement (uses cuRAND)
-__global__ void multinomial_sample(
-        int* __restrict__ out_idx, const float* __restrict__ probs,
-        float* __restrict__ cdf, int B, int num_samples,
-        uint64_t seed, int64_t* __restrict__ offset_ptr) {
-    int tid = threadIdx.x;
-    if (tid == 0) {
+__global__ void build_cdf(
+    float* __restrict__ cdf, const float* __restrict__ probs, int B) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
         float cum = 0.0f;
         for (int i = 0; i < B; i++) {
             cum += probs[i];
             cdf[i] = cum;
         }
     }
-    __syncthreads();
-    if (tid < num_samples) {
-        uint64_t base_off = *offset_ptr;
-        curandStatePhilox4_32_10_t rng_state;
-        curand_init(seed, base_off + tid, 0, &rng_state);
-        float u = curand_uniform(&rng_state);
-        int lo = 0, hi = B - 1;
-        while (lo < hi) {
-            int mid = (lo + hi) / 2;
-            if (cdf[mid] < u) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        out_idx[tid] = lo;
+}
+
+__global__ void advance_rng_offset(int64_t* __restrict__ offset_ptr, int64_t delta) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        *offset_ptr += delta;
     }
-    if (tid == 0) {
-        atomicAdd((unsigned long long*)offset_ptr, (unsigned long long)num_samples);
+}
+
+// Multinomial with replacement (uses cuRAND)
+__global__ void multinomial_sample(int* __restrict__ out_idx, const float* __restrict__ cdf,
+        int B, int num_samples, uint64_t seed, const int64_t* __restrict__ offset_ptr) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_samples) return;
+
+    uint64_t base_off = (uint64_t)(*offset_ptr);
+    curandStatePhilox4_32_10_t rng_state;
+    curand_init(seed, base_off + tid, 0, &rng_state);
+    float u = curand_uniform(&rng_state);
+
+    int lo = 0, hi = B - 1;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (cdf[mid] < u) lo = mid + 1;
+        else hi = mid;
     }
+    out_idx[tid] = lo;
 }
 
 // Prioritize high absolute advantage trajectories
@@ -1056,10 +1072,14 @@ void prio_replay_cuda(PrecisionTensor& advantages, float prio_alpha,
         advantages.data, bufs.prio_probs.data, prio_alpha, T);
     compute_prio_normalize<<<1, PRIO_BLOCK_SIZE, 0, stream>>>(
         bufs.prio_probs.data, B);
-    int block = fmaxf(((minibatch_segments + 31) / 32) * 32, 32);
-    multinomial_sample<<<1, block, 0, stream>>>(
-        bufs.idx.data, bufs.prio_probs.data,
-        bufs.cdf.data, B, minibatch_segments, seed, offset_ptr);
+    //int block = fmaxf(((minibatch_segments + 31) / 32) * 32, 32);
+    build_cdf<<<1, 1, 0, stream>>>(bufs.cdf.data, bufs.prio_probs.data, B);
+    int threads = 256;
+    int blocks = (minibatch_segments + threads - 1) / threads;
+    multinomial_sample<<<blocks, threads, 0, stream>>>(
+        bufs.idx.data, bufs.cdf.data, B, minibatch_segments, seed, offset_ptr);
+    advance_rng_offset<<<1, 1, 0, stream>>>(offset_ptr, (int64_t)minibatch_segments);
+
     int p3_blocks = (minibatch_segments + PRIO_BLOCK_SIZE - 1) / PRIO_BLOCK_SIZE;
     compute_prio_imp_weights<<<p3_blocks, PRIO_BLOCK_SIZE, 0, stream>>>(
         bufs.idx.data, bufs.prio_probs.data,
@@ -1368,7 +1388,8 @@ void train_impl(PuffeRL& pufferl) {
         } else {
             bool capturing = pufferl.train_warmup == hypers.cudagraphs;
             if (capturing) {
-                cudaStreamBeginCapture(train_stream, cudaStreamCaptureModeGlobal);
+                assert(cudaStreamBeginCapture(train_stream, cudaStreamCaptureModeGlobal) == cudaSuccess
+                        && "cudaStreamBeginCapture failed");
             }
 
             cudaStream_t stream = train_stream;
@@ -1400,9 +1421,11 @@ void train_impl(PuffeRL& pufferl) {
             }
             if (capturing) {
                 cudaGraph_t _graph;
-                cudaStreamEndCapture(train_stream, &_graph);
-                cudaGraphInstantiate(&pufferl.train_cudagraph, _graph, 0);
-                cudaGraphDestroy(_graph);
+                assert(cudaStreamEndCapture(train_stream, &_graph) == cudaSuccess
+                        && "cudaStreamEndCapture failed");
+                assert(cudaGraphInstantiate(&pufferl.train_cudagraph, _graph, 0) == cudaSuccess
+                        && "cudaGraphInstantiate failed");
+                assert(cudaGraphDestroy(_graph) == cudaSuccess && "cudaGraphDestroy failed");
                 cudaDeviceSynchronize();
                 pufferl.train_captured = true;
             }

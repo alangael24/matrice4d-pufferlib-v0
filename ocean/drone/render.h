@@ -5,6 +5,8 @@
 #pragma once
 
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "drone.h"
 #include "dronelib.h"
@@ -22,11 +24,11 @@ Color COLORS[64] = {W, B, B, R, R, B, B, W, B, W, B, R, R, B, W, B, B, B, W, R, 
 #undef B
 
 // 3D model config
-#define MODEL_SCALE_DEFAULT 5.0f
+#define MODEL_SCALE_DEFAULT 1.0f
 #define MODEL_SCALE_NORMAL 1.0f
 #define NUM_PROPELLERS 4
-static const int PROP_MESH_IDX[NUM_PROPELLERS] = {8, 6, 5, 7};
-static const float PROP_DIRS[NUM_PROPELLERS] = {1.0f, -1.0f, 1.0f, -1.0f};
+static const int PROP_MESH_IDX[NUM_PROPELLERS] = {-1, -1, -1, -1};
+static const float PROP_DIRS[NUM_PROPELLERS] = {1.0f, -1.0f, -1.0f, 1.0f};
 
 typedef struct Client Client;
 
@@ -213,6 +215,16 @@ static Vec3 compute_mesh_center(Mesh* mesh) {
     return scalmul3(center, 1.0f / mesh->vertexCount);
 }
 
+static inline float env_float(const char* name, float fallback) {
+    const char* value = getenv(name);
+    return (value == NULL || value[0] == '\0') ? fallback : strtof(value, NULL);
+}
+
+static inline int env_int(const char* name, int fallback) {
+    const char* value = getenv(name);
+    return (value == NULL || value[0] == '\0') ? fallback : atoi(value);
+}
+
 Client* make_client(DroneEnv* env) {
     Client* client = (Client*)calloc(1, sizeof(Client));
 
@@ -232,9 +244,9 @@ Client* make_client(DroneEnv* env) {
         return NULL;
     }
 
-    client->camera_distance = 40.0f;
-    client->camera_azimuth = 0.0f;
-    client->camera_elevation = PI / 10.0f;
+    client->camera_distance = env_float("PUFFER_DRONE_CAMERA_DISTANCE", 40.0f);
+    client->camera_azimuth = env_float("PUFFER_DRONE_CAMERA_AZIMUTH", 0.0f);
+    client->camera_elevation = env_float("PUFFER_DRONE_CAMERA_ELEVATION", PI / 10.0f);
     client->is_dragging = false;
     client->last_mouse_pos = (Vector2){0.0f, 0.0f};
 
@@ -257,16 +269,22 @@ Client* make_client(DroneEnv* env) {
     }
 
     client->selected_drone = 0;
-    client->inspect_mode = false;
-    client->follow_mode = false;
+    client->inspect_mode = env_int("PUFFER_DRONE_INSPECT", 0) != 0;
+    client->follow_mode = env_int("PUFFER_DRONE_FOLLOW", 0) != 0;
     client->target_fps = 100;
     client->model_loaded = false;
-    client->model_scale = MODEL_SCALE_DEFAULT;
-    client->render_mode = 0;
+    client->model_scale = env_float("PUFFER_DRONE_MODEL_SCALE", MODEL_SCALE_DEFAULT);
+    client->render_mode = env_int("PUFFER_DRONE_RENDER_MODE", 0);
 
     // Load 3D model
-    const char* model_paths[] = {"resources/crazyflie.glb", "resources/drone/crazyflie.glb",
-                                 "crazyflie.glb", NULL};
+    const char* model_paths[] = {
+        "resources/drone/matrice4d.glb",
+        "resources/matrice4d.glb",
+        "matrice4d.glb",
+        "resources/drone/crazyflie.glb",
+        "resources/crazyflie.glb",
+        "crazyflie.glb",
+        NULL};
 
     for (int i = 0; model_paths[i] != NULL; i++) {
         if (FileExists(model_paths[i])) {
@@ -280,7 +298,7 @@ Client* make_client(DroneEnv* env) {
                 for (int p = 0; p < NUM_PROPELLERS; p++) {
                     int idx = PROP_MESH_IDX[p];
 
-                    if (idx < client->drone_model.meshCount) {
+                    if (idx >= 0 && idx < client->drone_model.meshCount) {
                         client->prop_centers[p] =
                             compute_mesh_center(&client->drone_model.meshes[idx]);
                     }
@@ -302,6 +320,25 @@ const Color PUFF_CYAN = (Color){0, 187, 187, 255};
 const Color PUFF_WHITE = (Color){241, 241, 241, 241};
 const Color PUFF_BACKGROUND = (Color){6, 24, 24, 255};
 const Color PUFF_GREEN = (Color){0, 220, 80, 255};
+
+static inline void maybe_save_render_frame(void) {
+    const char* frame_dir = getenv("PUFFER_FRAME_DIR");
+    if (frame_dir == NULL || frame_dir[0] == '\0') {
+        return;
+    }
+
+    static int frame = 0;
+    const char* max_frames_str = getenv("PUFFER_SAVE_FRAMES");
+    int max_frames = max_frames_str ? atoi(max_frames_str) : 0;
+    if (max_frames > 0 && frame >= max_frames) {
+        return;
+    }
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/frame_%06d.png", frame_dir, frame);
+    TakeScreenshot(path);
+    frame++;
+}
 
 void DrawRing3D(Target ring, float thickness, Color entryColor, Color exitColor) {
     float half_thick = thickness / 2.0f;
@@ -383,13 +420,14 @@ void DrawDronePrimitive(Client* client, Drone* agent, float* actions, Color body
 
     DrawSphere((Vector3){agent->state.pos.x, agent->state.pos.y, agent->state.pos.z}, 0.06f * scale,
                body_color);
-
     const float rotor_radius = 0.03f * scale;
-    const float arm_len = 0.15f * scale;
-    const float diag = arm_len * 0.7071f; // 1/sqrt(2)
 
+    // CAD-aligned primitive fallback. Motor/action order: [FL, FR, RL, RR].
     Vec3 rotor_offsets[4] = {
-        {+diag, +diag, 0.0f}, {+diag, -diag, 0.0f}, {-diag, -diag, 0.0f}, {-diag, +diag, 0.0f}};
+        {agent->params.motor_x[0] * scale, agent->params.motor_y[0] * scale, 0.0f},
+        {agent->params.motor_x[1] * scale, agent->params.motor_y[1] * scale, 0.0f},
+        {agent->params.motor_x[2] * scale, agent->params.motor_y[2] * scale, 0.0f},
+        {agent->params.motor_x[3] * scale, agent->params.motor_y[3] * scale, 0.0f}};
 
     for (int j = 0; j < 4; j++) {
         Vec3 world_off = quat_rotate(agent->state.quat, rotor_offsets[j]);
@@ -697,4 +735,5 @@ void c_render(DroneEnv* env) {
              inspect_mode ? PUFF_GREEN : LIGHTGRAY);
 
     EndDrawing();
+    maybe_save_render_frame();
 }
