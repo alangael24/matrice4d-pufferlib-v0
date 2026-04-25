@@ -269,17 +269,22 @@ void c_step(DroneEnv* env) {
         move_drone(agent, &env->actions[4 * i]);
         agent->episode_length++;
 
-        bool oob = norm3(sub3(agent->target->pos, agent->state.pos)) > env->oob_radius;
-        bool timeout = (agent->episode_length >= HORIZON);
-
-        float curr = hover_potential(agent, env->hover_dist, env->hover_omega, env->hover_vel);
-        float prev_dist = norm3(sub3(agent->target->pos, agent->prev_pos));
-        float curr_dist = norm3(sub3(agent->target->pos, agent->state.pos));
+        Vec3 to_target_curr = sub3(agent->target->pos, agent->state.pos);
+        Vec3 to_target_prev = sub3(agent->target->pos, agent->prev_pos);
+        float curr_dist = norm3(to_target_curr);
+        float prev_dist = norm3(to_target_prev);
+        float vel = norm3(agent->state.vel);
         float omega = norm3(agent->state.omega);
         float omega_xy = sqrtf(agent->state.omega.x * agent->state.omega.x
                              + agent->state.omega.y * agent->state.omega.y);
         float omega_z = agent->state.omega.z;
         float omega_z_abs = fabsf(omega_z);
+
+        bool oob = curr_dist > env->oob_radius;
+        bool timeout = (agent->episode_length >= HORIZON);
+
+        float curr = hover_potential_values(curr_dist, vel, omega,
+                                            env->hover_dist, env->hover_omega, env->hover_vel);
         float r_omega_xy = -env->alpha_omega_xy * omega_xy;
         float r_omega_z = -env->alpha_omega_z * omega_z_abs
                         - env->alpha_omega_z_sq * env->alpha_omega_z_mult * omega_z * omega_z;
@@ -294,15 +299,16 @@ void c_step(DroneEnv* env) {
         
         agent->prev_potential = curr;
 
-        float h = check_hover(agent, env->hover_dist, env->hover_omega, env->hover_vel);
+        float h = check_hover_values(curr_dist, vel, omega,
+                                     env->hover_dist, env->hover_omega, env->hover_vel);
         agent->hover_score += h;
         agent->hover_ema = (1.0f - 0.02f) * agent->hover_ema + 0.02f * h;
         agent->ema_dist = 0.99f * agent->ema_dist + 0.01f * curr_dist;
-        agent->ema_vel = 0.99f * agent->ema_vel + 0.01f * norm3(agent->state.vel);
+        agent->ema_vel = 0.99f * agent->ema_vel + 0.01f * vel;
         agent->ema_omega = 0.99f * agent->ema_omega + 0.01f * omega;
         agent->ema_omega_x = 0.99f * agent->ema_omega_x + 0.01f * fabsf(agent->state.omega.x);
         agent->ema_omega_y = 0.99f * agent->ema_omega_y + 0.01f * fabsf(agent->state.omega.y);
-        agent->ema_omega_z = 0.99f * agent->ema_omega_z + 0.01f * fabsf(agent->state.omega.z);
+        agent->ema_omega_z = 0.99f * agent->ema_omega_z + 0.01f * omega_z_abs;
         record_step_metrics(agent, raw_actions, r_dist, r_hover, r_shaping, r_omega,
                             r_omega_xy, r_omega_z, r_terminal);
         agent->episode_return += reward;
