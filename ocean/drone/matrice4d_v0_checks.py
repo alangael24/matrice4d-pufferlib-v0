@@ -147,7 +147,10 @@ def main() -> int:
     if "> env->oob_radius" not in drone_h_text:
         raise AssertionError("OOB check is not using env.oob_radius")
     dronelib_text = DRONELIB.read_text(encoding="utf-8", errors="replace")
-    if "actions[i] * params->action_scale" not in dronelib_text:
+    if (
+        "actions[i] * params->action_scale" not in dronelib_text
+        and "actions[i] * drone->params.action_scale" not in dronelib_text
+    ):
         raise AssertionError("actions are not scaled around hover trim")
 
     print("Matrice 4D V0 checks passed")
