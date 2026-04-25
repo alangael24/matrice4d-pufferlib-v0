@@ -40,6 +40,9 @@ struct DroneEnv {
     float alpha_hover;
     float alpha_shaping;
     float alpha_omega;
+    float alpha_omega_xy;
+    float alpha_omega_z;
+    float alpha_omega_z_sq;
 
     // hover task parameters
     float hover_target_dist;
@@ -77,6 +80,8 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     env->log.ema_dist += agent->ema_dist;
     env->log.ema_vel += agent->ema_vel;
     env->log.ema_omega += agent->ema_omega;
+    env->log.r_omega_xy += agent->r_omega_xy;
+    env->log.r_omega_z += agent->r_omega_z;
 
     env->log.n += 1.0f;
 
@@ -104,6 +109,8 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->ema_dist = 0.0f;
     agent->ema_vel = 0.0f;
     agent->ema_omega = 0.0f;
+    agent->r_omega_xy = 0.0f;
+    agent->r_omega_z = 0.0f;
 
     agent->buffer = env->ring_buffer;
     agent->buffer_size = env->max_rings;
@@ -155,11 +162,20 @@ void c_step(DroneEnv* env) {
         float prev_dist = norm3(sub3(agent->target->pos, agent->prev_pos));
         float curr_dist = norm3(sub3(agent->target->pos, agent->state.pos));
         float omega = norm3(agent->state.omega);
+        float omega_xy = sqrtf(agent->state.omega.x * agent->state.omega.x
+                             + agent->state.omega.y * agent->state.omega.y);
+        float omega_z = agent->state.omega.z;
+        float omega_z_abs = fabsf(omega_z);
+        float r_omega_xy = -env->alpha_omega_xy * omega_xy;
+        float r_omega_z = -env->alpha_omega_z * omega_z_abs
+                        - env->alpha_omega_z_sq * omega_z * omega_z;
 
+        // Branch goal: penalize yaw spin without destroying translational navigation.
         float reward = env->alpha_dist * (prev_dist - curr_dist)
                      + env->alpha_hover * curr
                      + env->alpha_shaping * (curr - agent->prev_potential)
-                     - env->alpha_omega * omega;
+                     + r_omega_xy
+                     + r_omega_z;
         
         agent->prev_potential = curr;
 
@@ -169,6 +185,8 @@ void c_step(DroneEnv* env) {
         agent->ema_dist = 0.99f * agent->ema_dist + 0.01f * curr_dist;
         agent->ema_vel = 0.99f * agent->ema_vel + 0.01f * norm3(agent->state.vel);
         agent->ema_omega = 0.99f * agent->ema_omega + 0.01f * omega;
+        agent->r_omega_xy += r_omega_xy;
+        agent->r_omega_z += r_omega_z;
         agent->episode_return += reward;
         env->rewards[i] = reward;
 

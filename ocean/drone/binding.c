@@ -17,6 +17,9 @@ void my_init(Env* env, Dict* kwargs) {
     env->alpha_hover = dict_get(kwargs, "alpha_hover")->value;
     env->alpha_shaping = dict_get(kwargs, "alpha_shaping")->value;
     env->alpha_omega = dict_get(kwargs, "alpha_omega")->value;
+    env->alpha_omega_xy = dict_get(kwargs, "alpha_omega_xy")->value;
+    env->alpha_omega_z = dict_get(kwargs, "alpha_omega_z")->value;
+    env->alpha_omega_z_sq = dict_get(kwargs, "alpha_omega_z_sq")->value;
     env->hover_target_dist = dict_get(kwargs, "hover_target_dist")->value;
     env->hover_dist = dict_get(kwargs, "hover_dist")->value;
     env->hover_omega = dict_get(kwargs, "hover_omega")->value;
@@ -37,4 +40,6 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "ema_dist", log->ema_dist);
     dict_set(out, "ema_vel", log->ema_vel);
     dict_set(out, "ema_omega", log->ema_omega);
+    dict_set(out, "r_omega_xy", log->r_omega_xy);
+    dict_set(out, "r_omega_z", log->r_omega_z);
 }

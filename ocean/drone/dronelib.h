@@ -67,6 +67,8 @@ struct Log {
     float ema_dist;
     float ema_vel;
     float ema_omega;
+    float r_omega_xy;
+    float r_omega_z;
     float n;
 };
 
@@ -152,6 +154,8 @@ typedef struct {
     float ema_dist;
     float ema_vel;
     float ema_omega;
+    float r_omega_xy;
+    float r_omega_z;
 } Drone;
 
 static inline float clampf(float v, float min, float max) {
