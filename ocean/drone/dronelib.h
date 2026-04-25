@@ -669,11 +669,8 @@ static inline bool check_collision(Drone* agent, Drone* others, int num_agents) 
     return nearest_dist < 0.1f;
 }
 
-float hover_potential(Drone* agent, float hover_dist, float hover_omega, float hover_vel) {
-    float dist = norm3(sub3(agent->target->pos, agent->state.pos));
-    float vel = norm3(agent->state.vel);
-    float omega = norm3(agent->state.omega);
-
+static inline float hover_potential_values(float dist, float vel, float omega,
+                                           float hover_dist, float hover_omega, float hover_vel) {
     float d = 1.0f / (1.0f + dist / hover_dist);
     float v = 1.0f / (1.0f + vel / hover_vel);
     float w = 1.0f / (1.0f + omega / hover_omega);
@@ -681,17 +678,28 @@ float hover_potential(Drone* agent, float hover_dist, float hover_omega, float h
     return d * (0.7f + 0.15f * v + 0.15f * w);
 }
 
-float check_hover(Drone* agent, float hover_dist, float hover_omega, float hover_vel) {
+float hover_potential(Drone* agent, float hover_dist, float hover_omega, float hover_vel) {
     float dist = norm3(sub3(agent->target->pos, agent->state.pos));
     float vel = norm3(agent->state.vel);
     float omega = norm3(agent->state.omega);
+    return hover_potential_values(dist, vel, omega, hover_dist, hover_omega, hover_vel);
+}
 
+static inline float check_hover_values(float dist, float vel, float omega,
+                                       float hover_dist, float hover_omega, float hover_vel) {
     float d = dist / (hover_dist * 10.0f);
     float v = vel / (hover_vel * 10.0f);
     float w = omega / (hover_omega * 10.0f);
 
     float score = 1.0f - 0.7f * d - 0.15f * v - 0.15f * w;
     return score > 0.0f ? score : 0.0f;
+}
+
+float check_hover(Drone* agent, float hover_dist, float hover_omega, float hover_vel) {
+    float dist = norm3(sub3(agent->target->pos, agent->state.pos));
+    float vel = norm3(agent->state.vel);
+    float omega = norm3(agent->state.omega);
+    return check_hover_values(dist, vel, omega, hover_dist, hover_omega, hover_vel);
 }
 
 void compute_drone_observations(Drone* agent, float* observations) {
