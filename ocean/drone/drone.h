@@ -52,6 +52,14 @@ struct DroneEnv {
     float hover_omega;
     float hover_vel;
     float domain_randomization;
+    float dr_mass;
+    float dr_inertia;
+    float dr_k_thrust;
+    float dr_linear_drag;
+    float dr_yaw_drag;
+    float dr_motor_lag;
+    float dr_com_xy;
+    float dr_com_z;
     float action_scale;
     float reset_pos_scale;
     float reset_yaw_range;
@@ -146,6 +154,17 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     env->log.r_omega_xy += agent->r_omega_xy_sum;
     env->log.r_omega_z += agent->r_omega_z_sum;
     env->log.r_terminal += agent->r_terminal_sum;
+    env->log.mass_mult_mean += agent->params.mass_mult;
+    env->log.ixx_mult_mean += agent->params.ixx_mult;
+    env->log.iyy_mult_mean += agent->params.iyy_mult;
+    env->log.izz_mult_mean += agent->params.izz_mult;
+    env->log.k_thrust_mult_mean += agent->params.k_thrust_mult;
+    env->log.linear_drag_mult_mean += agent->params.linear_drag_mult;
+    env->log.yaw_drag_mult_mean += agent->params.yaw_drag_mult;
+    env->log.motor_lag_mult_mean += agent->params.motor_lag_mult;
+    env->log.com_x_mean += agent->params.com_x;
+    env->log.com_y_mean += agent->params.com_y;
+    env->log.com_z_mean += agent->params.com_z;
 
     env->log.n += 1.0f;
 
@@ -160,6 +179,20 @@ void compute_observations(DroneEnv* env) {
     for (int i = 0; i < env->num_agents; i++) {
         compute_drone_observations(&env->agents[i], env->observations + i*23);
     }
+}
+
+static inline DomainRandomization env_domain_randomization(DroneEnv* env) {
+    return (DomainRandomization){
+        .enabled = env->domain_randomization,
+        .mass = env->dr_mass,
+        .inertia = env->dr_inertia,
+        .k_thrust = env->dr_k_thrust,
+        .linear_drag = env->dr_linear_drag,
+        .yaw_drag = env->dr_yaw_drag,
+        .motor_lag = env->dr_motor_lag,
+        .com_xy = env->dr_com_xy,
+        .com_z = env->dr_com_z,
+    };
 }
 
 void reset_agent(DroneEnv* env, Drone* agent, int idx) {
@@ -194,7 +227,8 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->buffer = env->ring_buffer;
     agent->buffer_size = env->max_rings;
 
-    init_drone(agent, &env->rng, env->domain_randomization);
+    DomainRandomization dr = env_domain_randomization(env);
+    init_drone(agent, &env->rng, &dr);
     agent->params.action_scale = env->action_scale;
 
     float pos_scale = clampf(env->reset_pos_scale, 0.0f, 1.0f);

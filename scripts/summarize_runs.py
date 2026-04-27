@@ -28,6 +28,36 @@ METRIC_KEYS = [
     "ema_dist",
     "ema_vel",
     "ema_omega",
+    "ema_omega_x",
+    "ema_omega_y",
+    "ema_omega_z",
+    "mean_abs_action",
+    "max_abs_action",
+    "action_saturation_frac",
+    "motor_clip_low_frac",
+    "motor_clip_high_frac",
+    "mean_rpm_FL",
+    "mean_rpm_FR",
+    "mean_rpm_RL",
+    "mean_rpm_RR",
+    "r_dist",
+    "r_hover",
+    "r_shaping",
+    "r_omega",
+    "r_omega_xy",
+    "r_omega_z",
+    "r_terminal",
+    "mass_mult_mean",
+    "ixx_mult_mean",
+    "iyy_mult_mean",
+    "izz_mult_mean",
+    "k_thrust_mult_mean",
+    "linear_drag_mult_mean",
+    "yaw_drag_mult_mean",
+    "motor_lag_mult_mean",
+    "com_x_mean",
+    "com_y_mean",
+    "com_z_mean",
 ]
 
 LOSS_KEYS = ["policy", "value", "entropy", "total", "old_kl", "kl", "clipfrac"]
@@ -48,10 +78,50 @@ def parse_numeric(value: str) -> float | int | str:
 
 def read_metric(text: str, key: str, word: bool = False) -> Any:
     token = r"[A-Za-z][A-Za-z0-9_-]*" if word else r"-?\d+(?:\.\d+)?(?:[KMB])?"
-    match = re.search(rf"(?:^|\s){re.escape(key)}\s+({token})(?=\s|$)", text, flags=re.IGNORECASE)
-    if not match:
+    matches = re.findall(rf"(?:^|\s){re.escape(key)}\s+({token})(?=\s|$)", text, flags=re.IGNORECASE)
+    if not matches:
         return None
-    return match.group(1) if word else parse_numeric(match.group(1))
+    value = matches[-1]
+    return value if word else parse_numeric(value)
+
+
+def parse_command_flags(command: str) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    if not command:
+        return parsed
+
+    mapping = {
+        "seed": "seed",
+        "train.seed": "seed",
+        "train.total-timesteps": "total_timesteps",
+        "vec.total-agents": "total_agents",
+        "vec.num-buffers": "num_buffers",
+        "vec.num-threads": "num_threads",
+        "env.num-drones": "num_drones",
+        "env.hover-target-dist": "target_dist",
+        "env.domain-randomization": "domain_randomization",
+        "env.action-scale": "action_scale",
+        "env.reset-yaw-range": "reset_yaw_range",
+        "env.reset-vel-max": "reset_vel_max",
+        "env.reset-pos-scale": "reset_pos_scale",
+        "env.oob-radius": "oob_radius",
+        "env.alpha-omega-z-mult": "yaw_mult",
+        "env.dr-mass": "dr_mass",
+        "env.dr-inertia": "dr_inertia",
+        "env.dr-k-thrust": "dr_k_thrust",
+        "env.dr-linear-drag": "dr_linear_drag",
+        "env.dr-yaw-drag": "dr_yaw_drag",
+        "env.dr-motor-lag": "dr_motor_lag",
+        "env.dr-com-xy": "dr_com_xy",
+        "env.dr-com-z": "dr_com_z",
+        "policy.num-layers": "num_layers",
+    }
+
+    for key, value in re.findall(r"--([A-Za-z0-9_.-]+)\s+([^\\\s]+)", command):
+        out_key = mapping.get(key)
+        if out_key is not None:
+            parsed[out_key] = parse_numeric(value.strip("'\""))
+    return parsed
 
 
 def parse_stdout(path: Path) -> dict[str, Any]:
@@ -102,9 +172,11 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                 metadata[key] = value
 
     command = ""
+    command_flags = {}
     command_path = run_dir / "command.sh"
     if command_path.exists():
         command = command_path.read_text(encoding="utf-8", errors="replace").strip()
+        command_flags = parse_command_flags(command)
 
     checkpoints = checkpoint_files(run_dir)
     return {
@@ -112,6 +184,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "run_name": run_dir.name,
         "metadata": metadata,
         "command": command,
+        "command_flags": command_flags,
         "summary": parsed.get("summary", {}),
         "losses": parsed.get("losses", {}),
         "metrics": parsed.get("metrics", {}),
@@ -131,7 +204,31 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
         "run_name",
         "exit_code",
+        "seed",
+        "total_timesteps",
+        "target_dist",
+        "action_scale",
+        "yaw_mult",
+        "domain_randomization",
+        "reset_yaw_range",
+        "reset_vel_max",
+        "reset_pos_scale",
+        "oob_radius",
+        "total_agents",
+        "num_buffers",
+        "num_threads",
+        "num_drones",
+        "dr_mass",
+        "dr_inertia",
+        "dr_k_thrust",
+        "dr_linear_drag",
+        "dr_yaw_drag",
+        "dr_motor_lag",
+        "dr_com_xy",
+        "dr_com_z",
         "steps",
+        "sps",
+        "epoch",
         "perf",
         "score",
         "oob",
@@ -141,6 +238,36 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "ema_dist",
         "ema_vel",
         "ema_omega",
+        "ema_omega_x",
+        "ema_omega_y",
+        "ema_omega_z",
+        "mean_abs_action",
+        "max_abs_action",
+        "action_saturation_frac",
+        "motor_clip_low_frac",
+        "motor_clip_high_frac",
+        "mean_rpm_FL",
+        "mean_rpm_FR",
+        "mean_rpm_RL",
+        "mean_rpm_RR",
+        "r_dist",
+        "r_hover",
+        "r_shaping",
+        "r_omega",
+        "r_omega_xy",
+        "r_omega_z",
+        "r_terminal",
+        "mass_mult_mean",
+        "ixx_mult_mean",
+        "iyy_mult_mean",
+        "izz_mult_mean",
+        "k_thrust_mult_mean",
+        "linear_drag_mult_mean",
+        "yaw_drag_mult_mean",
+        "motor_lag_mult_mean",
+        "com_x_mean",
+        "com_y_mean",
+        "com_z_mean",
         "checkpoint_count",
         "latest_checkpoint_bytes",
         "latest_checkpoint_path",
@@ -152,11 +279,36 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             metrics = row.get("metrics", {})
             summary = row.get("summary", {})
             metadata = row.get("metadata", {})
+            command_flags = row.get("command_flags", {})
             latest = row.get("latest_checkpoint") or {}
             writer.writerow({
                 "run_name": row.get("run_name"),
                 "exit_code": metadata.get("exit_code"),
+                "seed": command_flags.get("seed"),
+                "total_timesteps": command_flags.get("total_timesteps"),
+                "target_dist": command_flags.get("target_dist"),
+                "action_scale": command_flags.get("action_scale"),
+                "yaw_mult": command_flags.get("yaw_mult"),
+                "domain_randomization": command_flags.get("domain_randomization"),
+                "reset_yaw_range": command_flags.get("reset_yaw_range"),
+                "reset_vel_max": command_flags.get("reset_vel_max"),
+                "reset_pos_scale": command_flags.get("reset_pos_scale"),
+                "oob_radius": command_flags.get("oob_radius"),
+                "total_agents": command_flags.get("total_agents"),
+                "num_buffers": command_flags.get("num_buffers"),
+                "num_threads": command_flags.get("num_threads"),
+                "num_drones": command_flags.get("num_drones"),
+                "dr_mass": command_flags.get("dr_mass"),
+                "dr_inertia": command_flags.get("dr_inertia"),
+                "dr_k_thrust": command_flags.get("dr_k_thrust"),
+                "dr_linear_drag": command_flags.get("dr_linear_drag"),
+                "dr_yaw_drag": command_flags.get("dr_yaw_drag"),
+                "dr_motor_lag": command_flags.get("dr_motor_lag"),
+                "dr_com_xy": command_flags.get("dr_com_xy"),
+                "dr_com_z": command_flags.get("dr_com_z"),
                 "steps": summary.get("steps"),
+                "sps": summary.get("sps"),
+                "epoch": summary.get("epoch"),
                 "perf": metrics.get("perf"),
                 "score": metrics.get("score"),
                 "oob": metrics.get("oob"),
@@ -166,6 +318,36 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 "ema_dist": metrics.get("ema_dist"),
                 "ema_vel": metrics.get("ema_vel"),
                 "ema_omega": metrics.get("ema_omega"),
+                "ema_omega_x": metrics.get("ema_omega_x"),
+                "ema_omega_y": metrics.get("ema_omega_y"),
+                "ema_omega_z": metrics.get("ema_omega_z"),
+                "mean_abs_action": metrics.get("mean_abs_action"),
+                "max_abs_action": metrics.get("max_abs_action"),
+                "action_saturation_frac": metrics.get("action_saturation_frac"),
+                "motor_clip_low_frac": metrics.get("motor_clip_low_frac"),
+                "motor_clip_high_frac": metrics.get("motor_clip_high_frac"),
+                "mean_rpm_FL": metrics.get("mean_rpm_FL"),
+                "mean_rpm_FR": metrics.get("mean_rpm_FR"),
+                "mean_rpm_RL": metrics.get("mean_rpm_RL"),
+                "mean_rpm_RR": metrics.get("mean_rpm_RR"),
+                "r_dist": metrics.get("r_dist"),
+                "r_hover": metrics.get("r_hover"),
+                "r_shaping": metrics.get("r_shaping"),
+                "r_omega": metrics.get("r_omega"),
+                "r_omega_xy": metrics.get("r_omega_xy"),
+                "r_omega_z": metrics.get("r_omega_z"),
+                "r_terminal": metrics.get("r_terminal"),
+                "mass_mult_mean": metrics.get("mass_mult_mean"),
+                "ixx_mult_mean": metrics.get("ixx_mult_mean"),
+                "iyy_mult_mean": metrics.get("iyy_mult_mean"),
+                "izz_mult_mean": metrics.get("izz_mult_mean"),
+                "k_thrust_mult_mean": metrics.get("k_thrust_mult_mean"),
+                "linear_drag_mult_mean": metrics.get("linear_drag_mult_mean"),
+                "yaw_drag_mult_mean": metrics.get("yaw_drag_mult_mean"),
+                "motor_lag_mult_mean": metrics.get("motor_lag_mult_mean"),
+                "com_x_mean": metrics.get("com_x_mean"),
+                "com_y_mean": metrics.get("com_y_mean"),
+                "com_z_mean": metrics.get("com_z_mean"),
                 "checkpoint_count": row.get("checkpoint_count"),
                 "latest_checkpoint_bytes": latest.get("bytes"),
                 "latest_checkpoint_path": latest.get("path"),

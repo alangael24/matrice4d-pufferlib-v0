@@ -133,22 +133,73 @@ def main() -> int:
         raise AssertionError("config/drone.ini should use integer num_layers = 3")
     if re.search(r"(?m)^total_timesteps\s*=\s*3000000\s*$", config_text) is None:
         raise AssertionError("config/drone.ini should default to a 3M timestep smoke run")
-    if re.search(r"(?m)^domain_randomization\s*=\s*0\.05\s*$", config_text) is None:
-        raise AssertionError("config/drone.ini should expose baseline domain_randomization = 0.05")
+    if re.search(r"(?m)^domain_randomization\s*=\s*0\.0\s*$", config_text) is None:
+        raise AssertionError("config/drone.ini should default domain_randomization = 0.0 for nominal V0.11")
+    for key in [
+        "dr_mass",
+        "dr_inertia",
+        "dr_k_thrust",
+        "dr_linear_drag",
+        "dr_yaw_drag",
+        "dr_motor_lag",
+        "dr_com_xy",
+        "dr_com_z",
+    ]:
+        if re.search(rf"(?m)^{key}\s*=\s*0\.0\s*$", config_text) is None:
+            raise AssertionError(f"config/drone.ini should expose {key} = 0.0")
     if re.search(r"(?m)^action_scale\s*=\s*1\.0\s*$", config_text) is None:
         raise AssertionError("config/drone.ini should expose baseline action_scale = 1.0")
 
     if "agent->params.action_scale = env->action_scale;" not in drone_h_text:
         raise AssertionError("env.action_scale is not wired into drone params")
-    if "init_drone(agent, &env->rng, env->domain_randomization);" not in drone_h_text:
-        raise AssertionError("env.domain_randomization is not wired into reset")
+    if "DomainRandomization dr = env_domain_randomization(env);" not in drone_h_text:
+        raise AssertionError("env domain randomization config is not materialized on reset")
+    if "init_drone(agent, &env->rng, &dr);" not in drone_h_text:
+        raise AssertionError("granular domain randomization is not wired into init_drone")
     if "env->oob_radius = dict_get(kwargs, \"oob_radius\")->value;" not in binding_text:
         raise AssertionError("env.oob_radius is not wired through binding.c")
+    for key in [
+        "dr_mass",
+        "dr_inertia",
+        "dr_k_thrust",
+        "dr_linear_drag",
+        "dr_yaw_drag",
+        "dr_motor_lag",
+        "dr_com_xy",
+        "dr_com_z",
+    ]:
+        if f'env->{key} = dict_get(kwargs, "{key}")->value;' not in binding_text:
+            raise AssertionError(f"env.{key} is not wired through binding.c")
     if "> env->oob_radius" not in drone_h_text:
         raise AssertionError("OOB check is not using env.oob_radius")
     dronelib_text = DRONELIB.read_text(encoding="utf-8", errors="replace")
     if "actions[i] * params->action_scale" not in dronelib_text:
         raise AssertionError("actions are not scaled around hover trim")
+    for expected in [
+        "typedef struct {\n    float enabled;",
+        "float com_x;",
+        "drone->params.gravity = BASE_GRAVITY;",
+        "BASE_MOTOR_FL_X - com_x",
+        "hover_trim_thrusts(&drone->params, trim);",
+    ]:
+        if expected not in dronelib_text:
+            raise AssertionError("granular domain randomization support is incomplete")
+
+    com_x = 0.01
+    com_y = -0.007
+    shifted_motors = [(x - com_x, y - com_y) for x, y in motors]
+    shifted_allocation = [
+        [1.0, 1.0, 1.0, 1.0],
+        [shifted_motors[i][1] for i in range(4)],
+        [-shifted_motors[i][0] for i in range(4)],
+        [k_drag * yaw[i] for i in range(4)],
+    ]
+    shifted_trim = solve_4x4(shifted_allocation, hover_target)
+    shifted_achieved = mat_vec(shifted_allocation, shifted_trim)
+    for i, (actual, expected) in enumerate(zip(shifted_achieved, hover_target)):
+        close(actual, expected, 1e-9, f"COM-shifted hover allocation row {i}")
+    if not all(v > 0.0 and math.isfinite(v) for v in shifted_trim):
+        raise AssertionError(f"COM-shifted trim invalid: {shifted_trim}")
 
     print("Matrice 4D V0 checks passed")
     print("motor_order:", motor_order)

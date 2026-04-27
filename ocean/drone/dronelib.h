@@ -100,6 +100,17 @@ struct Log {
     float r_omega_xy;
     float r_omega_z;
     float r_terminal;
+    float mass_mult_mean;
+    float ixx_mult_mean;
+    float iyy_mult_mean;
+    float izz_mult_mean;
+    float k_thrust_mult_mean;
+    float linear_drag_mult_mean;
+    float yaw_drag_mult_mean;
+    float motor_lag_mult_mean;
+    float com_x_mean;
+    float com_y_mean;
+    float com_z_mean;
     float n;
 };
 
@@ -160,7 +171,30 @@ typedef struct {
     float max_omega;  // rad/s (observation clamp)
     float k_mot;      // s (motor RPM time constant)
     float action_scale; // policy action multiplier around hover trim
+    float com_x;      // m, center-of-mass offset relative CAD datum
+    float com_y;      // m
+    float com_z;      // m, logged for DR even though V0 thrust model ignores it
+    float mass_mult;
+    float ixx_mult;
+    float iyy_mult;
+    float izz_mult;
+    float k_thrust_mult;
+    float linear_drag_mult;
+    float yaw_drag_mult;
+    float motor_lag_mult;
 } Params;
+
+typedef struct {
+    float enabled;
+    float mass;
+    float inertia;
+    float k_thrust;
+    float linear_drag;
+    float yaw_drag;
+    float motor_lag;
+    float com_xy;
+    float com_z;
+} DomainRandomization;
 
 typedef struct {
     // core state and parameters
@@ -216,6 +250,34 @@ static inline float clampf(float v, float min, float max) {
 
 static inline float rndf(float a, float b, unsigned int* rng) {
     return a + ((float)rand_r(rng) / (float)RAND_MAX) * (b - a);
+}
+
+static inline float dr_abs_range(float v) {
+    return clampf(fabsf(v), 0.0f, 0.95f);
+}
+
+static inline bool dr_has_granular(const DomainRandomization* dr) {
+    return dr != NULL && (
+        fabsf(dr->mass) > 0.0f ||
+        fabsf(dr->inertia) > 0.0f ||
+        fabsf(dr->k_thrust) > 0.0f ||
+        fabsf(dr->linear_drag) > 0.0f ||
+        fabsf(dr->yaw_drag) > 0.0f ||
+        fabsf(dr->motor_lag) > 0.0f ||
+        fabsf(dr->com_xy) > 0.0f ||
+        fabsf(dr->com_z) > 0.0f
+    );
+}
+
+static inline float dr_param_range(const DomainRandomization* dr, float granular) {
+    if (dr == NULL || dr->enabled <= 0.0f) return 0.0f;
+    if (dr_has_granular(dr)) return dr_abs_range(granular);
+    return dr_abs_range(dr->enabled);
+}
+
+static inline float dr_sample_mult(unsigned int* rng, float range) {
+    range = dr_abs_range(range);
+    return rndf(1.0f - range, 1.0f + range, rng);
 }
 
 static inline Vec3 add3(Vec3 a, Vec3 b) { return (Vec3){a.x + b.x, a.y + b.y, a.z + b.z}; }
@@ -378,37 +440,63 @@ static inline float thrust_to_rpm(const Params* p, float thrust) {
     return sqrtf(thrust / p->k_thrust);
 }
 
-static inline void init_drone(Drone* drone, unsigned int* rng, float dr) {
-    drone->params.arm_len = BASE_ARM_LEN * rndf(1.0f - dr, 1.0f + dr, rng);
-    drone->params.mass = BASE_MASS * rndf(1.0f - dr, 1.0f + dr, rng);
-    drone->params.ixx = BASE_IXX * rndf(1.0f - dr, 1.0f + dr, rng);
-    drone->params.iyy = BASE_IYY * rndf(1.0f - dr, 1.0f + dr, rng);
-    drone->params.izz = BASE_IZZ * rndf(1.0f - dr, 1.0f + dr, rng);
-    drone->params.k_thrust = BASE_K_THRUST * rndf(1.0f - dr, 1.0f + dr, rng);
-    drone->params.k_ang_damp = BASE_K_ANG_DAMP * rndf(1.0f - dr, 1.0f + dr, rng);
-    drone->params.k_drag = BASE_K_DRAG * rndf(1.0f - dr, 1.0f + dr, rng);
-    drone->params.b_drag = BASE_B_DRAG * rndf(1.0f - dr, 1.0f + dr, rng);
-    drone->params.gravity = BASE_GRAVITY * rndf(0.99f, 1.01f, rng);
+static inline void init_drone(Drone* drone, unsigned int* rng, const DomainRandomization* dr) {
+    float mass_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->mass));
+    float ixx_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->inertia));
+    float iyy_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->inertia));
+    float izz_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->inertia));
+    float k_thrust_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->k_thrust));
+    float linear_drag_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->linear_drag));
+    float yaw_drag_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->yaw_drag));
+    float motor_lag_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->motor_lag));
+
+    float com_xy = (dr != NULL && dr->enabled > 0.0f) ? fabsf(dr->com_xy) : 0.0f;
+    float com_z_range = (dr != NULL && dr->enabled > 0.0f) ? fabsf(dr->com_z) : 0.0f;
+    float com_x = rndf(-com_xy, com_xy, rng);
+    float com_y = rndf(-com_xy, com_xy, rng);
+    float com_z = rndf(-com_z_range, com_z_range, rng);
+
+    drone->params.arm_len = BASE_ARM_LEN;
+    drone->params.mass = BASE_MASS * mass_mult;
+    drone->params.ixx = BASE_IXX * ixx_mult;
+    drone->params.iyy = BASE_IYY * iyy_mult;
+    drone->params.izz = BASE_IZZ * izz_mult;
+    drone->params.k_thrust = BASE_K_THRUST * k_thrust_mult;
+    drone->params.k_ang_damp = BASE_K_ANG_DAMP;
+    drone->params.k_drag = BASE_K_DRAG * yaw_drag_mult;
+    drone->params.b_drag = BASE_B_DRAG * linear_drag_mult;
+    drone->params.gravity = BASE_GRAVITY;
 
     drone->params.max_rpm = BASE_MAX_RPM;
     drone->params.max_vel = BASE_MAX_VEL;
     drone->params.max_omega = BASE_MAX_OMEGA;
 
-    drone->params.k_mot = BASE_K_MOT * rndf(1.0f - dr, 1.0f + dr, rng);
+    drone->params.k_mot = BASE_K_MOT * motor_lag_mult;
     drone->params.action_scale = 1.0f;
+    drone->params.com_x = com_x;
+    drone->params.com_y = com_y;
+    drone->params.com_z = com_z;
+    drone->params.mass_mult = mass_mult;
+    drone->params.ixx_mult = ixx_mult;
+    drone->params.iyy_mult = iyy_mult;
+    drone->params.izz_mult = izz_mult;
+    drone->params.k_thrust_mult = k_thrust_mult;
+    drone->params.linear_drag_mult = linear_drag_mult;
+    drone->params.yaw_drag_mult = yaw_drag_mult;
+    drone->params.motor_lag_mult = motor_lag_mult;
 
-    // Exact CAD motor datums. Keep deterministic for CAD/physics congruence.
-    drone->params.motor_x[0] = BASE_MOTOR_FL_X;
-    drone->params.motor_y[0] = BASE_MOTOR_FL_Y;
+    // Effective lever arms are expressed relative to the sampled COM.
+    drone->params.motor_x[0] = BASE_MOTOR_FL_X - com_x;
+    drone->params.motor_y[0] = BASE_MOTOR_FL_Y - com_y;
     drone->params.yaw_sign[0] = BASE_YAW_SIGN_FL;
-    drone->params.motor_x[1] = BASE_MOTOR_FR_X;
-    drone->params.motor_y[1] = BASE_MOTOR_FR_Y;
+    drone->params.motor_x[1] = BASE_MOTOR_FR_X - com_x;
+    drone->params.motor_y[1] = BASE_MOTOR_FR_Y - com_y;
     drone->params.yaw_sign[1] = BASE_YAW_SIGN_FR;
-    drone->params.motor_x[2] = BASE_MOTOR_RL_X;
-    drone->params.motor_y[2] = BASE_MOTOR_RL_Y;
+    drone->params.motor_x[2] = BASE_MOTOR_RL_X - com_x;
+    drone->params.motor_y[2] = BASE_MOTOR_RL_Y - com_y;
     drone->params.yaw_sign[2] = BASE_YAW_SIGN_RL;
-    drone->params.motor_x[3] = BASE_MOTOR_RR_X;
-    drone->params.motor_y[3] = BASE_MOTOR_RR_Y;
+    drone->params.motor_x[3] = BASE_MOTOR_RR_X - com_x;
+    drone->params.motor_y[3] = BASE_MOTOR_RR_Y - com_y;
     drone->params.yaw_sign[3] = BASE_YAW_SIGN_RR;
 
     float trim[4];

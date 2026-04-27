@@ -24,8 +24,8 @@ spin directions are out of scope for V0.
 - Action `0` maps to hover trim from the CAD allocation matrix.
 - `env.action_scale` scales policy actions around hover trim. `1.0` preserves
   the full baseline range; `0.2` or `0.3` is intended for easy curriculum runs.
-- `env.domain_randomization` controls the per-reset physics randomization
-  amount. `0.05` is the baseline; `0.0` disables it.
+- `env.domain_randomization` enables per-reset physics randomization. V0.11
+  adds granular `env.dr_*` controls and keeps all DR defaults at `0.0`.
 - Observations remain the PufferLib 23-float drone observation vector, with
   body-frame velocity and body-frame target vector.
 - Render fallback uses the same CAD motor positions instead of the original
@@ -62,7 +62,14 @@ hover_rpm: 5525.0
 ```text
 num_layers = 3
 total_timesteps = 3000000
-domain_randomization = 0.05
+domain_randomization = 0.0
+dr_mass = 0.0
+dr_inertia = 0.0
+dr_k_thrust = 0.0
+dr_linear_drag = 0.0
+dr_yaw_drag = 0.0
+dr_motor_lag = 0.0
+dr_com_xy = 0.0
 action_scale = 1.0
 ```
 

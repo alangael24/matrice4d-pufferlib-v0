@@ -27,6 +27,14 @@ void my_init(Env* env, Dict* kwargs) {
     env->hover_omega = dict_get(kwargs, "hover_omega")->value;
     env->hover_vel = dict_get(kwargs, "hover_vel")->value;
     env->domain_randomization = dict_get(kwargs, "domain_randomization")->value;
+    env->dr_mass = dict_get(kwargs, "dr_mass")->value;
+    env->dr_inertia = dict_get(kwargs, "dr_inertia")->value;
+    env->dr_k_thrust = dict_get(kwargs, "dr_k_thrust")->value;
+    env->dr_linear_drag = dict_get(kwargs, "dr_linear_drag")->value;
+    env->dr_yaw_drag = dict_get(kwargs, "dr_yaw_drag")->value;
+    env->dr_motor_lag = dict_get(kwargs, "dr_motor_lag")->value;
+    env->dr_com_xy = dict_get(kwargs, "dr_com_xy")->value;
+    env->dr_com_z = dict_get(kwargs, "dr_com_z")->value;
     env->action_scale = dict_get(kwargs, "action_scale")->value;
     env->reset_pos_scale = dict_get(kwargs, "reset_pos_scale")->value;
     env->reset_yaw_range = dict_get(kwargs, "reset_yaw_range")->value;
@@ -66,4 +74,15 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "r_omega_xy", log->r_omega_xy);
     dict_set(out, "r_omega_z", log->r_omega_z);
     dict_set(out, "r_terminal", log->r_terminal);
+    dict_set(out, "mass_mult_mean", log->mass_mult_mean);
+    dict_set(out, "ixx_mult_mean", log->ixx_mult_mean);
+    dict_set(out, "iyy_mult_mean", log->iyy_mult_mean);
+    dict_set(out, "izz_mult_mean", log->izz_mult_mean);
+    dict_set(out, "k_thrust_mult_mean", log->k_thrust_mult_mean);
+    dict_set(out, "linear_drag_mult_mean", log->linear_drag_mult_mean);
+    dict_set(out, "yaw_drag_mult_mean", log->yaw_drag_mult_mean);
+    dict_set(out, "motor_lag_mult_mean", log->motor_lag_mult_mean);
+    dict_set(out, "com_x_mean", log->com_x_mean);
+    dict_set(out, "com_y_mean", log->com_y_mean);
+    dict_set(out, "com_z_mean", log->com_z_mean);
 }
