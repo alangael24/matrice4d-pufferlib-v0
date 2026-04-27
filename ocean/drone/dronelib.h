@@ -160,6 +160,14 @@ typedef struct {
     float max_omega;  // rad/s (observation clamp)
     float k_mot;      // s (motor RPM time constant)
     float action_scale; // policy action multiplier around hover trim
+    float hover_trim[4];
+    float max_thrust_cached;
+    float inv_mass;
+    float inv_ixx;
+    float inv_iyy;
+    float inv_izz;
+    float inv_k_mot;
+    float inv_k_thrust;
 } Params;
 
 typedef struct {
@@ -411,10 +419,21 @@ static inline void init_drone(Drone* drone, unsigned int* rng, float dr) {
     drone->params.motor_y[3] = BASE_MOTOR_RR_Y;
     drone->params.yaw_sign[3] = BASE_YAW_SIGN_RR;
 
-    float trim[4];
-    hover_trim_thrusts(&drone->params, trim);
+    drone->params.max_thrust_cached =
+        drone->params.k_thrust * drone->params.max_rpm * drone->params.max_rpm;
+    drone->params.inv_mass = 1.0f / drone->params.mass;
+    drone->params.inv_ixx = 1.0f / drone->params.ixx;
+    drone->params.inv_iyy = 1.0f / drone->params.iyy;
+    drone->params.inv_izz = 1.0f / drone->params.izz;
+    drone->params.inv_k_mot = 1.0f / drone->params.k_mot;
+    drone->params.inv_k_thrust = 1.0f / drone->params.k_thrust;
+    hover_trim_thrusts(&drone->params, drone->params.hover_trim);
+
     for (int i = 0; i < 4; i++)
-        drone->state.rpms[i] = thrust_to_rpm(&drone->params, trim[i]);
+        drone->state.rpms[i] = sqrtf(
+            clampf(drone->params.hover_trim[i], 0.0f, drone->params.max_thrust_cached) *
+            drone->params.inv_k_thrust
+        );
 
     drone->state.pos = (Vec3){0.0f, 0.0f, 0.0f};
     drone->prev_pos = drone->state.pos;
@@ -425,21 +444,20 @@ static inline void init_drone(Drone* drone, unsigned int* rng, float dr) {
 
 static inline void compute_derivatives(State* state, Params* params, float* actions,
                                        StateDerivative* derivatives) {
-    float trim[4];
-    hover_trim_thrusts(params, trim);
-    float max_thrust = max_motor_thrust(params);
+    const float* trim = params->hover_trim;
+    float max_thrust = params->max_thrust_cached;
     float target_rpms[4];
     for (int i = 0; i < 4; i++) {
         float action = clampf(actions[i] * params->action_scale, -1.0f, 1.0f);
         float target_thrust = action >= 0.0f
             ? trim[i] + action * (max_thrust - trim[i])
             : trim[i] + action * trim[i];
-        target_rpms[i] = thrust_to_rpm(params, target_thrust);
+        target_rpms[i] = sqrtf(clampf(target_thrust, 0.0f, max_thrust) * params->inv_k_thrust);
     }
 
     float rpm_dot[4];
     for (int i = 0; i < 4; i++) {
-        rpm_dot[i] = (1.0f / params->k_mot) * (target_rpms[i] - state->rpms[i]);
+        rpm_dot[i] = params->inv_k_mot * (target_rpms[i] - state->rpms[i]);
     }
 
     // motor thrusts
@@ -464,9 +482,9 @@ static inline void compute_derivatives(State* state, Params* params, float* acti
 
     // linear acceleration
     Vec3 v_dot;
-    v_dot.x = (F_prop.x + F_aero.x) / params->mass;
-    v_dot.y = (F_prop.y + F_aero.y) / params->mass;
-    v_dot.z = ((F_prop.z + F_aero.z) / params->mass) - params->gravity;
+    v_dot.x = (F_prop.x + F_aero.x) * params->inv_mass;
+    v_dot.y = (F_prop.y + F_aero.y) * params->inv_mass;
+    v_dot.z = ((F_prop.z + F_aero.z) * params->inv_mass) - params->gravity;
 
     // quaternion rates
     Quat omega_q = (Quat){0.0f, state->omega.x, state->omega.y, state->omega.z};
@@ -509,9 +527,9 @@ static inline void compute_derivatives(State* state, Params* params, float* acti
 
     // angular velocity rates
     Vec3 w_dot;
-    w_dot.x = (Tau_prop.x + Tau_aero.x + Tau_iner.x) / params->ixx;
-    w_dot.y = (Tau_prop.y + Tau_aero.y + Tau_iner.y) / params->iyy;
-    w_dot.z = (Tau_prop.z + Tau_aero.z + Tau_iner.z) / params->izz;
+    w_dot.x = (Tau_prop.x + Tau_aero.x + Tau_iner.x) * params->inv_ixx;
+    w_dot.y = (Tau_prop.y + Tau_aero.y + Tau_iner.y) * params->inv_iyy;
+    w_dot.z = (Tau_prop.z + Tau_aero.z + Tau_iner.z) * params->inv_izz;
 
     derivatives->vel = state->vel;
     derivatives->v_dot = v_dot;
