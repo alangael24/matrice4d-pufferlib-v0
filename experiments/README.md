@@ -70,3 +70,59 @@ If this branch is later merged with OOB config, target-5m runs can use:
 ```bash
 EXTRA_ARGS="--env.oob-radius 12" bash experiments/run_v0_1_gpu_batch.sh
 ```
+
+## V0.11 DR Ablation Sweep
+
+Use this runner to find which DR-medium parameter group breaks target5. It
+continues from the V0.10 target5 nominal checkpoint and starts from the known
+passing DR-light configuration. Each ablation raises one parameter group to the
+DR-medium setting.
+
+Minimal first pass:
+
+```bash
+BASE=/matrice4d-pufferlib-v0/base_target5_seed46.bin \
+BATCH_ID=v0_11_dr_ablation_core_100m \
+TOTAL_TIMESTEPS=100000000 \
+bash experiments/run_v0_11_dr_ablation.sh
+```
+
+The default ablations are:
+
+```text
+k_thrust motor_lag latency_noise
+```
+
+Full sweep:
+
+```bash
+BASE=/matrice4d-pufferlib-v0/base_target5_seed46.bin \
+BATCH_ID=v0_11_dr_ablation_full_100m \
+TOTAL_TIMESTEPS=100000000 \
+ABLATIONS="all" \
+bash experiments/run_v0_11_dr_ablation.sh
+```
+
+Explicit custom sweep:
+
+```bash
+BASE=/matrice4d-pufferlib-v0/base_target5_seed46.bin \
+ABLATIONS="com inertia drag mass medium_all" \
+bash experiments/run_v0_11_dr_ablation.sh
+```
+
+Valid ablations:
+
+```text
+light_control
+mass
+inertia
+k_thrust
+drag
+motor_lag
+com
+latency_noise
+latency
+sensor_noise
+medium_all
+```
