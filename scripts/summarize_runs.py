@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -97,6 +98,7 @@ def parse_command_flags(command: str) -> dict[str, Any]:
         return parsed
 
     mapping = {
+        "load-model-path": "loaded_checkpoint_path",
         "seed": "seed",
         "train.seed": "seed",
         "train.total-timesteps": "total_timesteps",
@@ -130,6 +132,26 @@ def parse_command_flags(command: str) -> dict[str, Any]:
         if out_key is not None:
             parsed[out_key] = parse_numeric(value.strip("'\""))
     return parsed
+
+
+def checkpoint_step(path: str | None) -> int | None:
+    if not path:
+        return None
+    match = re.search(r"(\d{16})\.(?:bin|pt|pth|ckpt|safetensors)$", str(path))
+    return int(match.group(1)) if match else None
+
+
+def file_sha256(path: str | None) -> str | None:
+    if not path:
+        return None
+    file = Path(path)
+    if not file.exists():
+        return None
+    digest = hashlib.sha256()
+    with file.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def parse_stdout(path: Path) -> dict[str, Any]:
@@ -187,6 +209,10 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         command_flags = parse_command_flags(command)
 
     checkpoints = checkpoint_files(run_dir)
+    loaded_checkpoint_path = command_flags.get("loaded_checkpoint_path")
+    loaded_checkpoint_step = checkpoint_step(str(loaded_checkpoint_path)) if loaded_checkpoint_path else None
+    final_checkpoint_path = checkpoints[-1]["path"] if checkpoints else None
+    final_checkpoint_step = checkpoint_step(final_checkpoint_path)
     return {
         "run_dir": str(run_dir),
         "run_name": run_dir.name,
@@ -199,6 +225,15 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "checkpoint_count": len(checkpoints),
         "latest_checkpoint": checkpoints[-1] if checkpoints else None,
         "checkpoints": checkpoints,
+        "loaded_checkpoint_path": loaded_checkpoint_path,
+        "loaded_checkpoint_sha256": file_sha256(str(loaded_checkpoint_path)) if loaded_checkpoint_path else None,
+        "loaded_checkpoint_step": loaded_checkpoint_step,
+        "final_checkpoint_step": final_checkpoint_step,
+        "actual_delta_steps": (
+            final_checkpoint_step - loaded_checkpoint_step
+            if final_checkpoint_step is not None and loaded_checkpoint_step is not None
+            else None
+        ),
     }
 
 
@@ -212,6 +247,11 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
         "run_name",
         "exit_code",
+        "loaded_checkpoint_path",
+        "loaded_checkpoint_sha256",
+        "loaded_checkpoint_step",
+        "final_checkpoint_step",
+        "actual_delta_steps",
         "sweep_case",
         "ablation",
         "seed",
@@ -302,6 +342,11 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow({
                 "run_name": row.get("run_name"),
                 "exit_code": metadata.get("exit_code"),
+                "loaded_checkpoint_path": row.get("loaded_checkpoint_path"),
+                "loaded_checkpoint_sha256": row.get("loaded_checkpoint_sha256"),
+                "loaded_checkpoint_step": row.get("loaded_checkpoint_step"),
+                "final_checkpoint_step": row.get("final_checkpoint_step"),
+                "actual_delta_steps": row.get("actual_delta_steps"),
                 "sweep_case": metadata.get("sweep_case"),
                 "ablation": metadata.get("ablation"),
                 "seed": command_flags.get("seed"),

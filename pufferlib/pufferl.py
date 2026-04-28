@@ -177,9 +177,29 @@ def _resolve_backend(args):
         return PuffeRL
     return _C
 
+def _resolve_load_path(args):
+    load_path = args.get('load_model_path')
+    if load_path == 'latest':
+        checkpoint_dir = args['checkpoint_dir']
+        pattern = os.path.join(checkpoint_dir, args['env_name'], '**', '*.bin')
+        candidates = glob.glob(pattern, recursive=True)
+        if not candidates:
+            raise FileNotFoundError(f'No .bin checkpoints found in {checkpoint_dir}/{args["env_name"]}/')
+        load_path = max(candidates, key=os.path.getctime)
+    return load_path
+
+def _load_train_weights(backend, pufferl, args):
+    load_path = _resolve_load_path(args)
+    if load_path is None:
+        return None
+    backend.load_weights(pufferl, load_path)
+    print(f'Loaded training weights from {load_path}')
+    return load_path
+
 def _train_worker(args):
     backend = _resolve_backend(args)
     pufferl = backend.create_pufferl(args)
+    _load_train_weights(backend, pufferl, args)
     args.pop('nccl_id', None)
     while pufferl.global_step < args['train']['total_timesteps']:
         backend.rollouts(pufferl)
@@ -218,6 +238,7 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
         if result_queue is not None:
             result_queue.put((args['gpu_id'], [], [], []))
         return
+    _load_train_weights(backend, pufferl, args)
 
     args.pop('nccl_id', None)
     model_size = pufferl.num_params()
