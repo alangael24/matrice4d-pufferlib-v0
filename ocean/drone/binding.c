@@ -61,10 +61,14 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "ema_omega_y", log->ema_omega_y);
     dict_set(out, "ema_omega_z", log->ema_omega_z);
     dict_set(out, "mean_abs_action", log->mean_abs_action);
+    dict_set(out, "mean_abs_action_clipped", log->mean_abs_action_clipped);
     dict_set(out, "max_abs_action", log->max_abs_action);
     dict_set(out, "action_saturation_frac", log->action_saturation_frac);
     dict_set(out, "motor_clip_low_frac", log->motor_clip_low_frac);
     dict_set(out, "motor_clip_high_frac", log->motor_clip_high_frac);
+    dict_set(out, "hover_trim_rpm_mean", log->hover_trim_rpm_mean);
+    dict_set(out, "hover_trim_rpm_max", log->hover_trim_rpm_max);
+    dict_set(out, "hover_trim_rpm_frac_of_max", log->hover_trim_rpm_frac_of_max);
     dict_set(out, "mean_rpm_FL", log->mean_rpm_FL);
     dict_set(out, "mean_rpm_FR", log->mean_rpm_FR);
     dict_set(out, "mean_rpm_RL", log->mean_rpm_RL);
@@ -81,6 +85,8 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "iyy_mult_mean", log->iyy_mult_mean);
     dict_set(out, "izz_mult_mean", log->izz_mult_mean);
     dict_set(out, "k_thrust_mult_mean", log->k_thrust_mult_mean);
+    dict_set(out, "k_thrust_mult_min", log->k_thrust_mult_min);
+    dict_set(out, "k_thrust_mult_max", log->k_thrust_mult_max);
     dict_set(out, "linear_drag_mult_mean", log->linear_drag_mult_mean);
     dict_set(out, "yaw_drag_mult_mean", log->yaw_drag_mult_mean);
     dict_set(out, "motor_lag_mult_mean", log->motor_lag_mult_mean);

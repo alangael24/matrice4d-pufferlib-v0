@@ -126,3 +126,50 @@ latency
 sensor_noise
 medium_all
 ```
+
+## V0.11 K-Thrust Authority Sweep
+
+Use this runner after DR-light passes but DR-medium fails. It tests whether
+`k_thrust` randomization failure is caused by insufficient control authority.
+All non-thrust DR stays at the DR-light setting.
+
+Default sweep:
+
+```text
+kt15_scale05
+kt20_scale05
+kt20_scale07
+kt20_scale08
+```
+
+Run:
+
+```bash
+BASE=/matrice4d-pufferlib-v0/base_dr_light_seed46.bin \
+BATCH_ID=v0_11_kthrust_authority_100m \
+TOTAL_TIMESTEPS=100000000 \
+bash experiments/run_v0_11_kthrust_authority_sweep.sh
+```
+
+Short smoke test:
+
+```bash
+BASE=/matrice4d-pufferlib-v0/base_dr_light_seed46.bin \
+SEEDS="42 46" \
+TOTAL_TIMESTEPS=50000000 \
+bash experiments/run_v0_11_kthrust_authority_sweep.sh
+```
+
+Important metrics:
+
+```text
+hover_trim_rpm_mean
+hover_trim_rpm_max
+hover_trim_rpm_frac_of_max
+motor_clip_high_frac
+motor_clip_low_frac
+mean_abs_action_clipped
+action_saturation_frac
+k_thrust_mult_min
+k_thrust_mult_max
+```

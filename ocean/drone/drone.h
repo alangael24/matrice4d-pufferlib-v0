@@ -81,10 +81,13 @@ void init(DroneEnv* env) {
     env->tick = 0;
 }
 
+static inline DomainRandomization env_domain_randomization(DroneEnv* env);
+
 static inline void record_step_metrics(Drone* agent, float raw_actions[4], float r_dist,
                                         float r_hover, float r_shaping, float r_omega,
                                         float r_omega_xy, float r_omega_z, float r_terminal) {
     float action_abs_sum = 0.0f;
+    float action_clipped_abs_sum = 0.0f;
     float action_max_abs = 0.0f;
     float action_saturation_count = 0.0f;
     float motor_clip_low_count = 0.0f;
@@ -97,6 +100,7 @@ static inline void record_step_metrics(Drone* agent, float raw_actions[4], float
         if (abs_action >= 0.99f) action_saturation_count += 1.0f;
 
         float env_clipped = clampf(raw_actions[i], -1.0f, 1.0f);
+        action_clipped_abs_sum += fabsf(env_clipped);
         float motor_action = clampf(env_clipped * agent->params.action_scale, -1.0f, 1.0f);
         if (motor_action <= -0.99f) motor_clip_low_count += 1.0f;
         if (motor_action >= 0.99f) motor_clip_high_count += 1.0f;
@@ -105,6 +109,7 @@ static inline void record_step_metrics(Drone* agent, float raw_actions[4], float
     }
 
     agent->action_abs_sum += action_abs_sum / 4.0f;
+    agent->action_clipped_abs_sum += action_clipped_abs_sum / 4.0f;
     if (action_max_abs > agent->action_max_abs) agent->action_max_abs = action_max_abs;
     agent->action_saturation_count += action_saturation_count / 4.0f;
     agent->motor_clip_low_count += motor_clip_low_count / 4.0f;
@@ -141,10 +146,25 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     env->log.ema_omega_y += agent->ema_omega_y;
     env->log.ema_omega_z += agent->ema_omega_z;
     env->log.mean_abs_action += agent->action_abs_sum / steps;
+    env->log.mean_abs_action_clipped += agent->action_clipped_abs_sum / steps;
     env->log.max_abs_action += agent->action_max_abs;
     env->log.action_saturation_frac += agent->action_saturation_count / steps;
     env->log.motor_clip_low_frac += agent->motor_clip_low_count / steps;
     env->log.motor_clip_high_frac += agent->motor_clip_high_count / steps;
+
+    float trim[4];
+    float trim_rpm_sum = 0.0f;
+    float trim_rpm_max = 0.0f;
+    hover_trim_thrusts(&agent->params, trim);
+    for (int m = 0; m < 4; m++) {
+        float rpm = thrust_to_rpm(&agent->params, trim[m]);
+        trim_rpm_sum += rpm;
+        if (rpm > trim_rpm_max) trim_rpm_max = rpm;
+    }
+    env->log.hover_trim_rpm_mean += trim_rpm_sum / 4.0f;
+    env->log.hover_trim_rpm_max += trim_rpm_max;
+    env->log.hover_trim_rpm_frac_of_max += trim_rpm_max / fmaxf(agent->params.max_rpm, 1.0f);
+
     env->log.mean_rpm_FL += agent->rpm_sum[0] / steps;
     env->log.mean_rpm_FR += agent->rpm_sum[1] / steps;
     env->log.mean_rpm_RL += agent->rpm_sum[2] / steps;
@@ -161,6 +181,10 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     env->log.iyy_mult_mean += agent->params.iyy_mult;
     env->log.izz_mult_mean += agent->params.izz_mult;
     env->log.k_thrust_mult_mean += agent->params.k_thrust_mult;
+    DomainRandomization dr = env_domain_randomization(env);
+    float k_thrust_range = dr_param_range(&dr, dr.k_thrust);
+    env->log.k_thrust_mult_min += 1.0f - k_thrust_range;
+    env->log.k_thrust_mult_max += 1.0f + k_thrust_range;
     env->log.linear_drag_mult_mean += agent->params.linear_drag_mult;
     env->log.yaw_drag_mult_mean += agent->params.yaw_drag_mult;
     env->log.motor_lag_mult_mean += agent->params.motor_lag_mult;
@@ -243,6 +267,7 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->ema_omega_y = 0.0f;
     agent->ema_omega_z = 0.0f;
     agent->action_abs_sum = 0.0f;
+    agent->action_clipped_abs_sum = 0.0f;
     agent->action_max_abs = 0.0f;
     agent->action_saturation_count = 0.0f;
     agent->motor_clip_low_count = 0.0f;

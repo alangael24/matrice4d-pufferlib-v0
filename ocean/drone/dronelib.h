@@ -86,10 +86,14 @@ struct Log {
     float ema_omega_y;
     float ema_omega_z;
     float mean_abs_action;
+    float mean_abs_action_clipped;
     float max_abs_action;
     float action_saturation_frac;
     float motor_clip_low_frac;
     float motor_clip_high_frac;
+    float hover_trim_rpm_mean;
+    float hover_trim_rpm_max;
+    float hover_trim_rpm_frac_of_max;
     float mean_rpm_FL;
     float mean_rpm_FR;
     float mean_rpm_RL;
@@ -106,6 +110,8 @@ struct Log {
     float iyy_mult_mean;
     float izz_mult_mean;
     float k_thrust_mult_mean;
+    float k_thrust_mult_min;
+    float k_thrust_mult_max;
     float linear_drag_mult_mean;
     float yaw_drag_mult_mean;
     float motor_lag_mult_mean;
@@ -228,6 +234,7 @@ typedef struct {
     float ema_omega_y;
     float ema_omega_z;
     float action_abs_sum;
+    float action_clipped_abs_sum;
     float action_max_abs;
     float action_saturation_count;
     float motor_clip_low_count;
