@@ -144,6 +144,8 @@ def main() -> int:
         "dr_motor_lag",
         "dr_com_xy",
         "dr_com_z",
+        "action_latency",
+        "sensor_noise",
     ]:
         if re.search(rf"(?m)^{key}\s*=\s*0\.0\s*$", config_text) is None:
             raise AssertionError(f"config/drone.ini should expose {key} = 0.0")
@@ -167,6 +169,8 @@ def main() -> int:
         "dr_motor_lag",
         "dr_com_xy",
         "dr_com_z",
+        "action_latency",
+        "sensor_noise",
     ]:
         if f'env->{key} = dict_get(kwargs, "{key}")->value;' not in binding_text:
             raise AssertionError(f"env.{key} is not wired through binding.c")
@@ -181,9 +185,17 @@ def main() -> int:
         "drone->params.gravity = BASE_GRAVITY;",
         "BASE_MOTOR_FL_X - com_x",
         "hover_trim_thrusts(&drone->params, trim);",
+        "#define MAX_ACTION_LATENCY_STEPS 8",
     ]:
         if expected not in dronelib_text:
             raise AssertionError("granular domain randomization support is incomplete")
+    for expected in [
+        "apply_action_latency(agent, raw_actions, env_action_latency_steps(env), delayed_actions);",
+        "move_drone(agent, delayed_actions);",
+        "env->sensor_noise > 0.0f",
+    ]:
+        if expected not in drone_h_text:
+            raise AssertionError("latency/noise support is incomplete")
 
     com_x = 0.01
     com_y = -0.007

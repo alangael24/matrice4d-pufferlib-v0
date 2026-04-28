@@ -60,6 +60,7 @@
 #define DT 0.002f // 500 Hz
 #define ACTION_SUBSTEPS 5
 #define ACTION_DT (DT * (float)ACTION_SUBSTEPS) // 100 Hz
+#define MAX_ACTION_LATENCY_STEPS 8
 
 #define DT_RNG 0.0f
 
@@ -240,6 +241,8 @@ typedef struct {
     float r_omega_xy_sum;
     float r_omega_z_sum;
     float r_terminal_sum;
+    float action_history[MAX_ACTION_LATENCY_STEPS + 1][4];
+    int action_history_idx;
 } Drone;
 
 static inline float clampf(float v, float min, float max) {
@@ -509,6 +512,12 @@ static inline void init_drone(Drone* drone, unsigned int* rng, const DomainRando
     drone->state.vel = (Vec3){0.0f, 0.0f, 0.0f};
     drone->state.omega = (Vec3){0.0f, 0.0f, 0.0f};
     drone->state.quat = (Quat){1.0f, 0.0f, 0.0f, 0.0f};
+    drone->action_history_idx = 0;
+    for (int h = 0; h < MAX_ACTION_LATENCY_STEPS + 1; h++) {
+        for (int m = 0; m < 4; m++) {
+            drone->action_history[h][m] = 0.0f;
+        }
+    }
 }
 
 static inline void compute_derivatives(State* state, Params* params, float* actions,

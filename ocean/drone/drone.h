@@ -64,6 +64,8 @@ struct DroneEnv {
     float reset_pos_scale;
     float reset_yaw_range;
     float reset_vel_max;
+    float action_latency;
+    float sensor_noise;
 };
 
 void init(DroneEnv* env) {
@@ -177,7 +179,38 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
 
 void compute_observations(DroneEnv* env) {
     for (int i = 0; i < env->num_agents; i++) {
-        compute_drone_observations(&env->agents[i], env->observations + i*23);
+        float* obs = env->observations + i*23;
+        compute_drone_observations(&env->agents[i], obs);
+        if (env->sensor_noise > 0.0f) {
+            float noise = fminf(fabsf(env->sensor_noise), 1.0f);
+            for (int j = 0; j < 23; j++) {
+                obs[j] = clampf(obs[j] + rndf(-noise, noise, &env->rng), -2.0f, 2.0f);
+            }
+        }
+    }
+}
+
+static inline int env_action_latency_steps(DroneEnv* env) {
+    int steps = (int)floorf((fmaxf(env->action_latency, 0.0f) / ACTION_DT) + 0.5f);
+    if (steps < 0) return 0;
+    if (steps > MAX_ACTION_LATENCY_STEPS) return MAX_ACTION_LATENCY_STEPS;
+    return steps;
+}
+
+static inline void apply_action_latency(Drone* agent, float raw_actions[4], int delay_steps,
+                                        float delayed_actions[4]) {
+    delay_steps = delay_steps < 0 ? 0 : delay_steps;
+    delay_steps = delay_steps > MAX_ACTION_LATENCY_STEPS ? MAX_ACTION_LATENCY_STEPS : delay_steps;
+
+    agent->action_history_idx = (agent->action_history_idx + 1) % (MAX_ACTION_LATENCY_STEPS + 1);
+    for (int m = 0; m < 4; m++) {
+        agent->action_history[agent->action_history_idx][m] = raw_actions[m];
+    }
+
+    int read_idx = agent->action_history_idx - delay_steps;
+    if (read_idx < 0) read_idx += MAX_ACTION_LATENCY_STEPS + 1;
+    for (int m = 0; m < 4; m++) {
+        delayed_actions[m] = agent->action_history[read_idx][m];
     }
 }
 
@@ -300,7 +333,9 @@ void c_step(DroneEnv* env) {
             env->actions[4 * i + 2],
             env->actions[4 * i + 3],
         };
-        move_drone(agent, &env->actions[4 * i]);
+        float delayed_actions[4];
+        apply_action_latency(agent, raw_actions, env_action_latency_steps(env), delayed_actions);
+        move_drone(agent, delayed_actions);
         agent->episode_length++;
 
         bool oob = norm3(sub3(agent->target->pos, agent->state.pos)) > env->oob_radius;

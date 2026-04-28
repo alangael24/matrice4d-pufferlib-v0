@@ -19,6 +19,8 @@ also supports the legacy scalar range.
 --env.dr-motor-lag 0.05
 --env.dr-com-xy 0.01
 --env.dr-com-z 0.00
+--env.action-latency 0.00
+--env.sensor-noise 0.00
 ```
 
 ## Sampling
@@ -37,6 +39,12 @@ COM z       = U(-dr_com_z, dr_com_z)
 ```
 
 Ranges are clamped internally to keep multiplicative parameters positive.
+
+`action_latency` is specified in seconds and rounded to the nearest 100 Hz
+action step. It is capped by `MAX_ACTION_LATENCY_STEPS`.
+
+`sensor_noise` is uniform noise added to each normalized observation element
+after observation construction. It defaults to zero and is clamped internally.
 
 ## COM And Hover Trim
 

@@ -31,6 +31,8 @@ RESET_YAW_RANGE="${RESET_YAW_RANGE:-3.14159}"
 RESET_VEL_MAX="${RESET_VEL_MAX:-0.2}"
 RESET_POS_SCALE="${RESET_POS_SCALE:-1.0}"
 OOB_RADIUS="${OOB_RADIUS:-12}"
+ACTION_LATENCY="${ACTION_LATENCY:-0.0}"
+SENSOR_NOISE="${SENSOR_NOISE:-0.0}"
 
 DR_MASS="${DR_MASS:-0.05}"
 DR_INERTIA="${DR_INERTIA:-0.10}"
@@ -115,6 +117,8 @@ git diff > "$BATCH_ROOT/git_diff.patch"
   echo "dr_motor_lag=$DR_MOTOR_LAG"
   echo "dr_com_xy=$DR_COM_XY"
   echo "dr_com_z=$DR_COM_Z"
+  echo "action_latency=$ACTION_LATENCY"
+  echo "sensor_noise=$SENSOR_NOISE"
 } > "$BATCH_ROOT/batch_metadata.env"
 
 if [[ "$BUILD_FIRST" == "1" ]]; then
@@ -172,6 +176,8 @@ run_experiment() {
     --env.dr-motor-lag "$DR_MOTOR_LAG"
     --env.dr-com-xy "$DR_COM_XY"
     --env.dr-com-z "$DR_COM_Z"
+    --env.action-latency "$ACTION_LATENCY"
+    --env.sensor-noise "$SENSOR_NOISE"
     --policy.num-layers 3
   )
 
@@ -204,6 +210,8 @@ run_experiment() {
     echo "dr_motor_lag=$DR_MOTOR_LAG"
     echo "dr_com_xy=$DR_COM_XY"
     echo "dr_com_z=$DR_COM_Z"
+    echo "action_latency=$ACTION_LATENCY"
+    echo "sensor_noise=$SENSOR_NOISE"
   } > "$run_dir/run_metadata.env"
 
   echo

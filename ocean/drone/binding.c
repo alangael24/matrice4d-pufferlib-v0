@@ -39,6 +39,8 @@ void my_init(Env* env, Dict* kwargs) {
     env->reset_pos_scale = dict_get(kwargs, "reset_pos_scale")->value;
     env->reset_yaw_range = dict_get(kwargs, "reset_yaw_range")->value;
     env->reset_vel_max = dict_get(kwargs, "reset_vel_max")->value;
+    env->action_latency = dict_get(kwargs, "action_latency")->value;
+    env->sensor_noise = dict_get(kwargs, "sensor_noise")->value;
     init(env);
 }
 

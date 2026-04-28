@@ -114,6 +114,8 @@ def parse_command_flags(command: str) -> dict[str, Any]:
         "env.dr-motor-lag": "dr_motor_lag",
         "env.dr-com-xy": "dr_com_xy",
         "env.dr-com-z": "dr_com_z",
+        "env.action-latency": "action_latency",
+        "env.sensor-noise": "sensor_noise",
         "policy.num-layers": "num_layers",
     }
 
@@ -226,6 +228,8 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "dr_motor_lag",
         "dr_com_xy",
         "dr_com_z",
+        "action_latency",
+        "sensor_noise",
         "steps",
         "sps",
         "epoch",
@@ -306,6 +310,8 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 "dr_motor_lag": command_flags.get("dr_motor_lag"),
                 "dr_com_xy": command_flags.get("dr_com_xy"),
                 "dr_com_z": command_flags.get("dr_com_z"),
+                "action_latency": command_flags.get("action_latency"),
+                "sensor_noise": command_flags.get("sensor_noise"),
                 "steps": summary.get("steps"),
                 "sps": summary.get("sps"),
                 "epoch": summary.get("epoch"),
