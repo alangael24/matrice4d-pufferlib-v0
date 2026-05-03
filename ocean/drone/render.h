@@ -147,6 +147,18 @@ void handle_camera_controls(Client* client, Vec3 target_pos, float min_zoom) {
         client->camera_distance = clampf(client->camera_distance, min_zoom, 100.0f);
         update_camera_position(client, target_pos);
     }
+
+    if (IsKeyDown(KEY_EQUAL) || IsKeyDown(KEY_KP_ADD)) {
+        client->camera_distance -= 0.25f;
+        client->camera_distance = clampf(client->camera_distance, min_zoom, 100.0f);
+        update_camera_position(client, target_pos);
+    }
+
+    if (IsKeyDown(KEY_MINUS) || IsKeyDown(KEY_KP_SUBTRACT)) {
+        client->camera_distance += 0.25f;
+        client->camera_distance = clampf(client->camera_distance, min_zoom, 100.0f);
+        update_camera_position(client, target_pos);
+    }
 }
 
 void handle_drone_selection(Client* client, int num_agents, float dt) {
