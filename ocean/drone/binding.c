@@ -94,3 +94,104 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "com_y_mean", log->com_y_mean);
     dict_set(out, "com_z_mean", log->com_z_mean);
 }
+
+typedef struct DroneDebugState {
+    float pos[3];
+    float vel[3];
+    float quat[4];
+    float omega[3];
+    float rpms[4];
+    float target_pos[3];
+    float target_normal[3];
+    float prev_pos[3];
+    float prev_potential;
+    float episode_return;
+    int episode_length;
+    float mass;
+    float ixx;
+    float iyy;
+    float izz;
+    float k_thrust;
+    float k_drag;
+    float b_drag;
+    float k_mot;
+    float action_scale;
+    float motor_x[4];
+    float motor_y[4];
+    float yaw_sign[4];
+    float hover_trim[4];
+} DroneDebugState;
+
+static int drone_debug_find_agent(StaticVec* vec, int agent_idx, DroneEnv** out_env, int* out_local) {
+    if (vec == NULL || vec->envs == NULL || agent_idx < 0 || agent_idx >= vec->total_agents) {
+        return 0;
+    }
+
+    DroneEnv* envs = (DroneEnv*)vec->envs;
+    int base = 0;
+    for (int e = 0; e < vec->size; e++) {
+        DroneEnv* env = &envs[e];
+        if (agent_idx < base + env->num_agents) {
+            *out_env = env;
+            *out_local = agent_idx - base;
+            return 1;
+        }
+        base += env->num_agents;
+    }
+    return 0;
+}
+
+int drone_debug_cpu_state(StaticVec* vec, int agent_idx, DroneDebugState* out) {
+    DroneEnv* env = NULL;
+    int local = 0;
+    if (out == NULL || !drone_debug_find_agent(vec, agent_idx, &env, &local)) {
+        return 0;
+    }
+
+    Drone* d = &env->agents[local];
+    memset(out, 0, sizeof(*out));
+    out->pos[0] = d->state.pos.x;
+    out->pos[1] = d->state.pos.y;
+    out->pos[2] = d->state.pos.z;
+    out->vel[0] = d->state.vel.x;
+    out->vel[1] = d->state.vel.y;
+    out->vel[2] = d->state.vel.z;
+    out->quat[0] = d->state.quat.w;
+    out->quat[1] = d->state.quat.x;
+    out->quat[2] = d->state.quat.y;
+    out->quat[3] = d->state.quat.z;
+    out->omega[0] = d->state.omega.x;
+    out->omega[1] = d->state.omega.y;
+    out->omega[2] = d->state.omega.z;
+    for (int i = 0; i < 4; i++) out->rpms[i] = d->state.rpms[i];
+    if (d->target != NULL) {
+        out->target_pos[0] = d->target->pos.x;
+        out->target_pos[1] = d->target->pos.y;
+        out->target_pos[2] = d->target->pos.z;
+        out->target_normal[0] = d->target->normal.x;
+        out->target_normal[1] = d->target->normal.y;
+        out->target_normal[2] = d->target->normal.z;
+    }
+    out->prev_pos[0] = d->prev_pos.x;
+    out->prev_pos[1] = d->prev_pos.y;
+    out->prev_pos[2] = d->prev_pos.z;
+    out->prev_potential = d->prev_potential;
+    out->episode_return = d->episode_return;
+    out->episode_length = d->episode_length;
+    out->mass = d->params.mass;
+    out->ixx = d->params.ixx;
+    out->iyy = d->params.iyy;
+    out->izz = d->params.izz;
+    out->k_thrust = d->params.k_thrust;
+    out->k_drag = d->params.k_drag;
+    out->b_drag = d->params.b_drag;
+    out->k_mot = d->params.k_mot;
+    out->action_scale = d->params.action_scale;
+    for (int i = 0; i < 4; i++) {
+        out->motor_x[i] = d->params.motor_x[i];
+        out->motor_y[i] = d->params.motor_y[i];
+        out->yaw_sign[i] = d->params.yaw_sign[i];
+    }
+    hover_trim_thrusts(&d->params, out->hover_trim);
+    return 1;
+}

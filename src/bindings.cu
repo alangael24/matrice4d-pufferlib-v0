@@ -264,6 +264,41 @@ struct VecEnv {
     int gpu;
 };
 
+typedef struct DroneDebugState {
+    float pos[3];
+    float vel[3];
+    float quat[4];
+    float omega[3];
+    float rpms[4];
+    float target_pos[3];
+    float target_normal[3];
+    float prev_pos[3];
+    float prev_potential;
+    float episode_return;
+    int episode_length;
+    float mass;
+    float ixx;
+    float iyy;
+    float izz;
+    float k_thrust;
+    float k_drag;
+    float b_drag;
+    float k_mot;
+    float action_scale;
+    float motor_x[4];
+    float motor_y[4];
+    float yaw_sign[4];
+    float hover_trim[4];
+} DroneDebugState;
+
+extern "C" __attribute__((weak)) int drone_debug_cpu_state(StaticVec*, int, DroneDebugState*) {
+    return 0;
+}
+
+extern "C" __attribute__((weak)) int drone_debug_cuda_state(StaticVec*, int, DroneDebugState*) {
+    return 0;
+}
+
 std::unique_ptr<VecEnv> create_vec(py::dict args, int gpu) {
     py::dict vec_kwargs = args["vec"].cast<py::dict>();
     py::dict env_kwargs = args["env"].cast<py::dict>();
@@ -291,6 +326,49 @@ std::unique_ptr<VecEnv> create_vec(py::dict args, int gpu) {
     ve->obs_dtype     = std::string(get_obs_dtype());
     ve->obs_elem_size = get_obs_elem_size();
     return ve;
+}
+
+static py::dict drone_debug_state_to_dict(const DroneDebugState& s) {
+    py::dict out;
+    out["pos"] = std::vector<float>(s.pos, s.pos + 3);
+    out["vel"] = std::vector<float>(s.vel, s.vel + 3);
+    out["quat"] = std::vector<float>(s.quat, s.quat + 4);
+    out["omega"] = std::vector<float>(s.omega, s.omega + 3);
+    out["rpms"] = std::vector<float>(s.rpms, s.rpms + 4);
+    out["target_pos"] = std::vector<float>(s.target_pos, s.target_pos + 3);
+    out["target_normal"] = std::vector<float>(s.target_normal, s.target_normal + 3);
+    out["prev_pos"] = std::vector<float>(s.prev_pos, s.prev_pos + 3);
+    out["prev_potential"] = s.prev_potential;
+    out["episode_return"] = s.episode_return;
+    out["episode_length"] = s.episode_length;
+    out["mass"] = s.mass;
+    out["ixx"] = s.ixx;
+    out["iyy"] = s.iyy;
+    out["izz"] = s.izz;
+    out["k_thrust"] = s.k_thrust;
+    out["k_drag"] = s.k_drag;
+    out["b_drag"] = s.b_drag;
+    out["k_mot"] = s.k_mot;
+    out["action_scale"] = s.action_scale;
+    out["motor_x"] = std::vector<float>(s.motor_x, s.motor_x + 4);
+    out["motor_y"] = std::vector<float>(s.motor_y, s.motor_y + 4);
+    out["yaw_sign"] = std::vector<float>(s.yaw_sign, s.yaw_sign + 4);
+    out["hover_trim"] = std::vector<float>(s.hover_trim, s.hover_trim + 4);
+    return out;
+}
+
+py::dict vec_debug_state(VecEnv& ve, int agent_idx) {
+    if (agent_idx < 0 || agent_idx >= ve.total_agents) {
+        throw std::runtime_error("agent_idx out of range");
+    }
+
+    DroneDebugState state = {};
+    int ok = ve.gpu ? drone_debug_cuda_state(ve.vec, agent_idx, &state)
+                    : drone_debug_cpu_state(ve.vec, agent_idx, &state);
+    if (!ok) {
+        throw std::runtime_error("debug_state is only available for drone CPU/CUDA env builds");
+    }
+    return drone_debug_state_to_dict(state);
 }
 
 void vec_reset(VecEnv& ve) {
@@ -552,6 +630,7 @@ PYBIND11_MODULE(_C, m) {
         .def("reset", &vec_reset)
         .def("gpu_step", &gpu_vec_step_py)
         .def("cpu_step", &cpu_vec_step_py)
+        .def("debug_state", &vec_debug_state)
         .def("render", [](VecEnv& ve, int env_id) { static_vec_render(ve.vec, env_id); })
         .def("log",   &vec_log)
         .def("close", &vec_close);

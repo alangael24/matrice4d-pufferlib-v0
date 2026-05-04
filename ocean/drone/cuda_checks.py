@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import ctypes
 import ctypes.util
 import json
@@ -121,6 +122,113 @@ def make_actions(step, num_agents, amplitude):
     return amplitude * np.sin(0.013 * idx + 0.017 * float(step)).astype(np.float32)
 
 
+STATE_FIELDS = {
+    "pos": ("x", "y", "z"),
+    "vel": ("x", "y", "z"),
+    "quat": ("w", "x", "y", "z"),
+    "omega": ("x", "y", "z"),
+    "rpms": ("FL", "FR", "RL", "RR"),
+    "target_pos": ("x", "y", "z"),
+    "target_normal": ("x", "y", "z"),
+    "prev_pos": ("x", "y", "z"),
+    "motor_x": ("FL", "FR", "RL", "RR"),
+    "motor_y": ("FL", "FR", "RL", "RR"),
+    "yaw_sign": ("FL", "FR", "RL", "RR"),
+    "hover_trim": ("FL", "FR", "RL", "RR"),
+}
+
+STATE_SCALARS = (
+    "prev_potential",
+    "episode_return",
+    "episode_length",
+    "mass",
+    "ixx",
+    "iyy",
+    "izz",
+    "k_thrust",
+    "k_drag",
+    "b_drag",
+    "k_mot",
+    "action_scale",
+)
+
+
+def csv_fieldnames(include_state):
+    fields = [
+        "step",
+        "max_obs_diff",
+        "argmax_agent",
+        "argmax_obs_index",
+        "obs_cpu_argmax",
+        "obs_cuda_argmax",
+        "reward_cpu",
+        "reward_cuda",
+        "reward_diff",
+        "terminal_cpu",
+        "terminal_cuda",
+        "terminal_diff",
+        "max_reward_diff",
+        "max_terminal_diff",
+    ]
+    if include_state:
+        for name, suffixes in STATE_FIELDS.items():
+            for suffix in suffixes:
+                fields += [
+                    f"{name}_{suffix}_cpu",
+                    f"{name}_{suffix}_cuda",
+                    f"{name}_{suffix}_diff",
+                ]
+        for name in STATE_SCALARS:
+            fields += [f"{name}_cpu", f"{name}_cuda", f"{name}_diff"]
+    return fields
+
+
+def add_state_columns(row, cpu_state, cuda_state):
+    for name, suffixes in STATE_FIELDS.items():
+        cpu_values = cpu_state[name]
+        cuda_values = cuda_state[name]
+        for idx, suffix in enumerate(suffixes):
+            cpu_val = float(cpu_values[idx])
+            cuda_val = float(cuda_values[idx])
+            row[f"{name}_{suffix}_cpu"] = cpu_val
+            row[f"{name}_{suffix}_cuda"] = cuda_val
+            row[f"{name}_{suffix}_diff"] = abs(cpu_val - cuda_val)
+    for name in STATE_SCALARS:
+        cpu_val = float(cpu_state[name])
+        cuda_val = float(cuda_state[name])
+        row[f"{name}_cpu"] = cpu_val
+        row[f"{name}_cuda"] = cuda_val
+        row[f"{name}_diff"] = abs(cpu_val - cuda_val)
+
+
+def make_diff_row(step, cpu_obs, gpu_obs, cpu_rewards, gpu_rewards,
+                  cpu_terms, gpu_terms, cpu_vec, gpu_vec, include_state):
+    obs_abs = np.abs(cpu_obs - gpu_obs)
+    flat_idx = int(np.argmax(obs_abs))
+    agent_idx, obs_idx = np.unravel_index(flat_idx, obs_abs.shape)
+    reward_diff = float(abs(cpu_rewards[agent_idx] - gpu_rewards[agent_idx]))
+    terminal_diff = float(abs(cpu_terms[agent_idx] - gpu_terms[agent_idx]))
+    row = {
+        "step": step,
+        "max_obs_diff": float(obs_abs[agent_idx, obs_idx]),
+        "argmax_agent": int(agent_idx),
+        "argmax_obs_index": int(obs_idx),
+        "obs_cpu_argmax": float(cpu_obs[agent_idx, obs_idx]),
+        "obs_cuda_argmax": float(gpu_obs[agent_idx, obs_idx]),
+        "reward_cpu": float(cpu_rewards[agent_idx]),
+        "reward_cuda": float(gpu_rewards[agent_idx]),
+        "reward_diff": reward_diff,
+        "terminal_cpu": float(cpu_terms[agent_idx]),
+        "terminal_cuda": float(gpu_terms[agent_idx]),
+        "terminal_diff": terminal_diff,
+        "max_reward_diff": float(np.max(np.abs(cpu_rewards - gpu_rewards))),
+        "max_terminal_diff": float(np.max(np.abs(cpu_terms - gpu_terms))),
+    }
+    if include_state:
+        add_state_columns(row, cpu_vec.debug_state(int(agent_idx)), gpu_vec.debug_state(int(agent_idx)))
+    return row
+
+
 def main():
     parser = argparse.ArgumentParser(description="CPU-vs-CUDA numeric parity check for drone env.")
     parser.add_argument("--steps", type=int, default=1000)
@@ -129,6 +237,9 @@ def main():
     parser.add_argument("--obs-tol", type=float, default=1e-3)
     parser.add_argument("--reward-tol", type=float, default=1e-4)
     parser.add_argument("--out", default="")
+    parser.add_argument("--dump-diffs", default="", help="Optional CSV path with per-step max diffs.")
+    parser.add_argument("--dump-state", action="store_true",
+                        help="Include CPU/CUDA physical state for the max-drift agent in --dump-diffs.")
     args = parser.parse_args()
 
     if getattr(_C, "env_name", None) != "drone":
@@ -148,7 +259,18 @@ def main():
     max_reward = 0.0
     max_terminal = 0.0
     first_terminal_mismatch = None
+    csv_file = None
+    writer = None
     try:
+        if args.dump_state and not args.dump_diffs:
+            raise RuntimeError("--dump-state requires --dump-diffs")
+        if args.dump_diffs:
+            dump_path = Path(args.dump_diffs)
+            dump_path.parent.mkdir(parents=True, exist_ok=True)
+            csv_file = dump_path.open("w", newline="", encoding="utf-8")
+            writer = csv.DictWriter(csv_file, fieldnames=csv_fieldnames(args.dump_state))
+            writer.writeheader()
+
         cpu_vec.reset()
         gpu_vec.reset()
         cuda_check(cudart, cudart.cudaDeviceSynchronize(), "cudaDeviceSynchronize(reset)")
@@ -163,6 +285,10 @@ def main():
         max_obs = max(max_obs, float(np.max(np.abs(cpu_obs - gpu_obs))))
         max_reward = max(max_reward, float(np.max(np.abs(cpu_rewards - gpu_rewards))))
         max_terminal = max(max_terminal, float(np.max(np.abs(cpu_terms - gpu_terms))))
+        if writer is not None:
+            writer.writerow(make_diff_row(-1, cpu_obs, gpu_obs, cpu_rewards, gpu_rewards,
+                                          cpu_terms, gpu_terms, cpu_vec, gpu_vec,
+                                          args.dump_state))
 
         for step in range(args.steps):
             actions = make_actions(step, args.num_agents, args.action_amplitude)
@@ -183,7 +309,13 @@ def main():
             max_terminal = max(max_terminal, terminal_diff)
             if terminal_diff > 0.0 and first_terminal_mismatch is None:
                 first_terminal_mismatch = step
+            if writer is not None:
+                writer.writerow(make_diff_row(step, cpu_obs, gpu_obs, cpu_rewards, gpu_rewards,
+                                              cpu_terms, gpu_terms, cpu_vec, gpu_vec,
+                                              args.dump_state))
     finally:
+        if csv_file is not None:
+            csv_file.close()
         cudart.cudaFree(d_actions)
         cpu_vec.close()
         gpu_vec.close()

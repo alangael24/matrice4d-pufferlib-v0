@@ -173,6 +173,33 @@ struct DroneCudaLog {
     float n;
 };
 
+typedef struct DroneDebugState {
+    float pos[3];
+    float vel[3];
+    float quat[4];
+    float omega[3];
+    float rpms[4];
+    float target_pos[3];
+    float target_normal[3];
+    float prev_pos[3];
+    float prev_potential;
+    float episode_return;
+    int episode_length;
+    float mass;
+    float ixx;
+    float iyy;
+    float izz;
+    float k_thrust;
+    float k_drag;
+    float b_drag;
+    float k_mot;
+    float action_scale;
+    float motor_x[4];
+    float motor_y[4];
+    float yaw_sign[4];
+    float hover_trim[4];
+} DroneDebugState;
+
 struct DroneCudaCtx {
     int total_agents;
     int horizon;
@@ -1040,6 +1067,116 @@ extern "C" void cuda_env_log(StaticVec* vec, Dict* out) {
     dict_set(out, "com_z_mean", h.com_z_mean * inv);
     dict_set(out, "n", h.n);
     CUDA_ENV_CHECK(cudaMemset(ctx->log, 0, sizeof(DroneCudaLog)));
+}
+
+static void hover_trim_thrusts_host(const DroneCudaParams* p, float out[4]) {
+    float a[4][5] = {
+        {1.0f, 1.0f, 1.0f, 1.0f, p->mass * p->gravity},
+        {p->motor_y[0], p->motor_y[1], p->motor_y[2], p->motor_y[3], 0.0f},
+        {-p->motor_x[0], -p->motor_x[1], -p->motor_x[2], -p->motor_x[3], 0.0f},
+        {p->k_drag * p->yaw_sign[0], p->k_drag * p->yaw_sign[1],
+         p->k_drag * p->yaw_sign[2], p->k_drag * p->yaw_sign[3], 0.0f},
+    };
+
+    bool ok = true;
+    for (int col = 0; col < 4; col++) {
+        int pivot = col;
+        float best = fabsf(a[col][col]);
+        for (int row = col + 1; row < 4; row++) {
+            float candidate = fabsf(a[row][col]);
+            if (candidate > best) {
+                best = candidate;
+                pivot = row;
+            }
+        }
+        if (best < 1e-8f) {
+            ok = false;
+            break;
+        }
+        if (pivot != col) {
+            for (int k = col; k < 5; k++) {
+                float tmp = a[col][k];
+                a[col][k] = a[pivot][k];
+                a[pivot][k] = tmp;
+            }
+        }
+        float inv = 1.0f / a[col][col];
+        for (int k = col; k < 5; k++) a[col][k] *= inv;
+        for (int row = 0; row < 4; row++) {
+            if (row == col) continue;
+            float f = a[row][col];
+            for (int k = col; k < 5; k++) a[row][k] -= f * a[col][k];
+        }
+    }
+
+    if (!ok) {
+        float fallback = 0.25f * p->mass * p->gravity;
+        for (int i = 0; i < 4; i++) out[i] = fallback;
+        return;
+    }
+
+    float max_t = p->k_thrust * p->max_rpm * p->max_rpm;
+    for (int i = 0; i < 4; i++) {
+        out[i] = fminf(fmaxf(a[i][4], 0.0f), max_t);
+    }
+}
+
+extern "C" int drone_debug_cuda_state(StaticVec* vec, int agent_idx, DroneDebugState* out) {
+    DroneCudaCtx* ctx = (DroneCudaCtx*)vec->cuda_env;
+    if (ctx == NULL || out == NULL || agent_idx < 0 || agent_idx >= ctx->total_agents) {
+        return 0;
+    }
+
+    DroneCudaState s;
+    DroneCudaParams p;
+    cudaError_t err = cudaMemcpy(&s, ctx->states + agent_idx, sizeof(s), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) return 0;
+    err = cudaMemcpy(&p, ctx->params + agent_idx, sizeof(p), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) return 0;
+
+    memset(out, 0, sizeof(*out));
+    out->pos[0] = s.pos.x;
+    out->pos[1] = s.pos.y;
+    out->pos[2] = s.pos.z;
+    out->vel[0] = s.vel.x;
+    out->vel[1] = s.vel.y;
+    out->vel[2] = s.vel.z;
+    out->quat[0] = s.quat.x;
+    out->quat[1] = s.quat.y;
+    out->quat[2] = s.quat.z;
+    out->quat[3] = s.quat.w;
+    out->omega[0] = s.omega.x;
+    out->omega[1] = s.omega.y;
+    out->omega[2] = s.omega.z;
+    for (int i = 0; i < 4; i++) out->rpms[i] = s.rpms[i];
+    out->target_pos[0] = s.target_pos.x;
+    out->target_pos[1] = s.target_pos.y;
+    out->target_pos[2] = s.target_pos.z;
+    out->target_normal[0] = s.target_normal.x;
+    out->target_normal[1] = s.target_normal.y;
+    out->target_normal[2] = s.target_normal.z;
+    out->prev_pos[0] = s.prev_pos.x;
+    out->prev_pos[1] = s.prev_pos.y;
+    out->prev_pos[2] = s.prev_pos.z;
+    out->prev_potential = s.prev_potential;
+    out->episode_return = s.episode_return;
+    out->episode_length = s.episode_length;
+    out->mass = p.mass;
+    out->ixx = p.ixx;
+    out->iyy = p.iyy;
+    out->izz = p.izz;
+    out->k_thrust = p.k_thrust;
+    out->k_drag = p.k_drag;
+    out->b_drag = p.b_drag;
+    out->k_mot = p.k_mot;
+    out->action_scale = p.action_scale;
+    for (int i = 0; i < 4; i++) {
+        out->motor_x[i] = p.motor_x[i];
+        out->motor_y[i] = p.motor_y[i];
+        out->yaw_sign[i] = p.yaw_sign[i];
+    }
+    hover_trim_thrusts_host(&p, out->hover_trim);
+    return 1;
 }
 
 extern "C" void cuda_env_close(StaticVec* vec) {
