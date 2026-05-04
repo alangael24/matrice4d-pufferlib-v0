@@ -229,6 +229,13 @@ EXT_SUFFIX=$(python -c "import sysconfig; print(sysconfig.get_config_var('EXT_SU
 OUTPUT="pufferlib/_C${EXT_SUFFIX}"
 
 BINDING_SRC="$SRC_DIR/binding.c"
+CUDA_ENV_SRC="$SRC_DIR/binding_cuda.cu"
+CUDA_ENV_DEFINE=""
+CUDA_ENV_OBJ=""
+if [ -f "$CUDA_ENV_SRC" ] && [ "$MODE" != "cpu" ] && [ "${PUFFERLIB_DISABLE_ENV_CUDA:-0}" != "1" ]; then
+    CUDA_ENV_DEFINE="-DENV_CUDA"
+    CUDA_ENV_OBJ="build/env_cuda_${ENV}.o"
+fi
 mkdir -p build
 STATIC_OBJ="build/libstatic_${ENV}.o"
 STATIC_LIB="build/libstatic_${ENV}.a"
@@ -243,6 +250,7 @@ ${CC:-clang} -c "${CLANG_OPT[@]}" $EXTRA_CFLAGS \
     -I. -Isrc -I$SRC_DIR -Ivendor \
     -I./$RAYLIB_NAME/include -I$CUDA_HOME/include \
     -DPLATFORM_DESKTOP \
+    $CUDA_ENV_DEFINE \
     -fno-semantic-interposition -fvisibility=hidden \
     -fPIC -fopenmp \
     "$BINDING_SRC" -o "$STATIC_OBJ"
@@ -268,12 +276,29 @@ if [ -z "$MODE" ]; then
         -Xcompiler=-fopenmp \
         -DOBS_TENSOR_T=$OBS_TENSOR_T \
         -DENV_NAME=$ENV \
+        $CUDA_ENV_DEFINE \
         $PRECISION $NVCC_OPT \
         src/bindings.cu -o build/bindings.o
 
+    if [ -n "$CUDA_ENV_OBJ" ]; then
+        echo "Compiling CUDA env for $ENV..."
+        $NVCC -c -arch=$ARCH -Xcompiler -fPIC \
+            -std=c++17 \
+            -I. -Isrc -I$SRC_DIR -Ivendor \
+            -I$CUDA_HOME/include \
+            $CUDA_ENV_DEFINE \
+            $PRECISION $NVCC_OPT \
+            "$CUDA_ENV_SRC" -o "$CUDA_ENV_OBJ"
+    fi
+
+    LINK_OBJECTS=(build/bindings.o)
+    if [ -n "$CUDA_ENV_OBJ" ]; then
+        LINK_OBJECTS+=("$CUDA_ENV_OBJ")
+    fi
+
     LINK_CMD=(
         ${CXX:-g++} -shared -fPIC -fopenmp
-        build/bindings.o "$STATIC_LIB" "$RAYLIB_A"
+        "${LINK_OBJECTS[@]}" "$STATIC_LIB" "$RAYLIB_A"
         -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG
         "${WHEEL_RPATH_FLAGS[@]}"
         -lcudart -lnccl -lnvidia-ml -lcublas -lcusolver -lcurand -lcudnn
@@ -307,16 +332,34 @@ elif [ "$MODE" = "cpu" ]; then
     echo "Built: $OUTPUT"
 
 elif [ "$MODE" = "profile" ]; then
+    if [ -n "$CUDA_ENV_OBJ" ]; then
+        echo "Compiling CUDA env for $ENV..."
+        $NVCC -c -arch=$ARCH -Xcompiler -fPIC \
+            -std=c++17 \
+            -I. -Isrc -I$SRC_DIR -Ivendor \
+            -I$CUDA_HOME/include \
+            $CUDA_ENV_DEFINE \
+            $PRECISION $NVCC_OPT \
+            "$CUDA_ENV_SRC" -o "$CUDA_ENV_OBJ"
+    fi
+
+    PROFILE_OBJECTS=()
+    if [ -n "$CUDA_ENV_OBJ" ]; then
+        PROFILE_OBJECTS+=("$CUDA_ENV_OBJ")
+    fi
+
     echo "Compiling profile binary ($ARCH)..."
     $NVCC $NVCC_OPT -arch=$ARCH -std=c++17 \
         -I. -Isrc -I$SRC_DIR -Ivendor \
         -I$CUDA_HOME/include $CUDNN_IFLAG $NCCL_IFLAG -I$RAYLIB_NAME/include \
         -DOBS_TENSOR_T=$OBS_TENSOR_T \
         -DENV_NAME=$ENV \
+        $CUDA_ENV_DEFINE \
         -Xcompiler=-DPLATFORM_DESKTOP \
         $PRECISION \
         -Xcompiler=-fopenmp \
         tests/profile_kernels.cu vendor/ini.c \
+        "${PROFILE_OBJECTS[@]}" \
         "$STATIC_LIB" "$RAYLIB_A" \
         -lnccl -lnvidia-ml -lcublas -lcurand -lcudnn \
         -lGL -lm -lpthread $OMP_LIB \

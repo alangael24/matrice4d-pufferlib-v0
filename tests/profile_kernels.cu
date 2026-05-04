@@ -687,7 +687,11 @@ void profile_envspeed(int total_agents, int num_buffers, int num_threads, int ho
 
     float rollout_ms = ms / completed;
     int total_steps = total_agents * horizon;
+    float eval_prof[NUM_EVAL_PROF] = {0};
+    static_vec_read_profile(args->vec, eval_prof);
     printf("  rollout time: %.2f ms (%d steps)\n", rollout_ms, total_steps);
+    printf("  eval_gpu: %.2f ms/rollout\n", eval_prof[EVAL_GPU] / completed);
+    printf("  eval_env: %.2f ms/rollout\n", eval_prof[EVAL_ENV_STEP] / completed);
     printf("  throughput: %.2f M steps/s\n", total_steps / rollout_ms / 1e3);
     free(args);
     printf("\n");

@@ -63,8 +63,10 @@ static inline void dict_set(Dict* dict, const char* key, double value) {
     dict->size++;
 }
 
-// Forward declare CUDA stream type
+// Forward declare CUDA stream type when CUDA headers are not present.
+#ifndef __CUDACC__
 typedef struct CUstream_st* cudaStream_t;
+#endif
 
 // Threading state
 typedef struct StaticThreading StaticThreading;
@@ -86,6 +88,7 @@ typedef struct StaticVec {
     float* gpu_actions;
     float* gpu_rewards;
     float* gpu_terminals;
+    void* cuda_env;
     cudaStream_t* streams;
     StaticThreading* threading;
     int obs_size;
@@ -129,6 +132,15 @@ size_t get_obs_elem_size(void);
 void static_vec_step(StaticVec* vec);
 void gpu_vec_step(StaticVec* vec);
 void cpu_vec_step(StaticVec* vec);
+
+#ifdef ENV_CUDA
+void cuda_env_init(StaticVec* vec, Dict* vec_kwargs, Dict* env_kwargs);
+void cuda_env_reset(StaticVec* vec);
+void cuda_env_step_buffer(StaticVec* vec, int agent_start, int count, cudaStream_t stream);
+void cuda_env_step_all(StaticVec* vec, cudaStream_t stream);
+void cuda_env_close(StaticVec* vec);
+void cuda_env_log(StaticVec* vec, Dict* out);
+#endif
 
 // Optional shared state functions
 void* my_shared(void* env, Dict* kwargs);
@@ -251,6 +263,21 @@ static void* static_omp_threadmanager(void* arg) {
         for (int t = 0; t < horizon; t++) {
             clock_gettime(CLOCK_MONOTONIC, &t0);
             net_callback(ctx, buf, t);
+
+#ifdef ENV_CUDA
+            if (vec->gpu) {
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+                my_accum[EVAL_GPU] += (t1.tv_sec - t0.tv_sec) * 1000.0f
+                                    + (t1.tv_nsec - t0.tv_nsec) / 1e6f;
+
+                clock_gettime(CLOCK_MONOTONIC, &t0);
+                cuda_env_step_buffer(vec, agent_start, agents_per_buffer, stream);
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+                my_accum[EVAL_ENV_STEP] += (t1.tv_sec - t0.tv_sec) * 1000.0f
+                                         + (t1.tv_nsec - t0.tv_nsec) / 1e6f;
+                continue;
+            }
+#endif
 
             cudaMemcpyAsync(
                 &vec->actions[agent_start * NUM_ATNS],
@@ -436,10 +463,24 @@ StaticVec* create_static_vec(int total_agents, int num_buffers, int gpu, Dict* v
         }
     }
 
+#ifdef ENV_CUDA
+    if (vec->gpu) {
+        cuda_env_init(vec, vec_kwargs, env_kwargs);
+    }
+#endif
+
     return vec;
 }
 
 void static_vec_reset(StaticVec* vec) {
+#ifdef ENV_CUDA
+    if (vec->gpu) {
+        cuda_env_reset(vec);
+        cudaDeviceSynchronize();
+        return;
+    }
+#endif
+
     Env* envs = (Env*)vec->envs;
     for (int i = 0; i < vec->size; i++) {
         c_reset(&envs[i]);
@@ -506,6 +547,12 @@ void static_vec_close(StaticVec* vec) {
     free(vec->buffer_env_starts);
     free(vec->buffer_env_counts);
 
+#ifdef ENV_CUDA
+    if (vec->gpu) {
+        cuda_env_close(vec);
+    }
+#endif
+
     if (vec->gpu) {
         cudaDeviceSynchronize();
         cudaFree(vec->gpu_observations);
@@ -551,6 +598,13 @@ static inline float static_vec_aggregate_logs(StaticVec* vec, Log* out) {
 }
 
 void static_vec_log(StaticVec* vec, Dict* out) {
+#ifdef ENV_CUDA
+    if (vec->gpu) {
+        cuda_env_log(vec, out);
+        return;
+    }
+#endif
+
     Env* envs = (Env*)vec->envs;
     Log aggregate;
     float n = static_vec_aggregate_logs(vec, &aggregate);
@@ -565,6 +619,13 @@ void static_vec_log(StaticVec* vec, Dict* out) {
 }
 
 void static_vec_eval_log(StaticVec* vec, Dict* out) {
+#ifdef ENV_CUDA
+    if (vec->gpu) {
+        cuda_env_log(vec, out);
+        return;
+    }
+#endif
+
     Log aggregate;
     float n = static_vec_aggregate_logs(vec, &aggregate);
     if (n == 0) {
@@ -615,6 +676,11 @@ static inline void _static_vec_env_step(StaticVec* vec) {
 
 void gpu_vec_step(StaticVec* vec) {
     assert(vec->buffers == 1);
+#ifdef ENV_CUDA
+    cuda_env_step_all(vec, 0);
+    return;
+#endif
+
     cudaMemcpy(vec->actions, vec->gpu_actions,
         (size_t)vec->total_agents * NUM_ATNS * sizeof(float),
         cudaMemcpyDeviceToHost);
