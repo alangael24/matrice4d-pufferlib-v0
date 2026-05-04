@@ -141,6 +141,46 @@ void rollouts(pybind11::object pufferl_obj) {
         }
     }
 
+#ifdef ENV_CUDA
+    if (cuda_rollout_fastpath_enabled_for_vec(pufferl.vec)) {
+        StaticVec* vec = pufferl.vec;
+        HypersT& hypers = pufferl.hypers;
+        cudaStream_t saved_tl_stream = tl_stream;
+        double eval_gpu_ms = 0.0;
+        double eval_env_ms = 0.0;
+
+        for (int t = 0; t < hypers.horizon; t++) {
+            for (int buf = 0; buf < hypers.num_buffers; buf++) {
+                int agent_start = buf * vec->agents_per_buffer;
+                cudaStream_t stream = pufferl.streams[buf];
+                tl_stream = stream;
+
+                double step_t0 = wall_clock();
+                net_callback_wrapper(&pufferl, buf, t);
+                double step_t1 = wall_clock();
+                eval_gpu_ms += (step_t1 - step_t0) * 1000.0;
+
+                step_t0 = wall_clock();
+                cuda_env_step_buffer(vec, agent_start, vec->agents_per_buffer, stream);
+                step_t1 = wall_clock();
+                eval_env_ms += (step_t1 - step_t0) * 1000.0;
+            }
+        }
+
+        for (int buf = 0; buf < hypers.num_buffers; buf++) {
+            cudaStreamSynchronize(pufferl.streams[buf]);
+        }
+        tl_stream = saved_tl_stream;
+
+        float sec = (float)(wall_clock() - t0);
+        pufferl.profile.accum[PROF_ROLLOUT] += sec * 1000.0f;
+        pufferl.profile.accum[PROF_EVAL_GPU] += (float)(eval_gpu_ms / hypers.num_buffers);
+        pufferl.profile.accum[PROF_EVAL_ENV] += (float)(eval_env_ms / hypers.num_buffers);
+        pufferl.global_step += pufferl.hypers.horizon * pufferl.hypers.total_agents;
+        return;
+    }
+#endif
+
     static_vec_omp_step(pufferl.vec);
     float sec = (float)(wall_clock() - t0);
     pufferl.profile.accum[PROF_ROLLOUT] += sec * 1000.0f;  // store as ms

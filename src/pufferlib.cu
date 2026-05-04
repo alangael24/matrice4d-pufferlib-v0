@@ -330,6 +330,17 @@ typedef struct {
     curandStatePhilox4_32_10_t** rng_states;  // per-buffer persistent RNG states [num_buffers]
 } PuffeRL;
 
+static inline bool cuda_rollout_fastpath_enabled_for_vec(StaticVec* vec) {
+#ifdef ENV_CUDA
+    return vec != nullptr
+        && vec->gpu
+        && getenv("PUFFERLIB_DISABLE_CUDA_ROLLOUT_FASTPATH") == nullptr;
+#else
+    (void)vec;
+    return false;
+#endif
+}
+
 Dict* log_environments_impl(PuffeRL& pufferl) {
     Dict* out = create_dict(128);
     static_vec_log(pufferl.vec, out);
@@ -1757,8 +1768,10 @@ std::unique_ptr<PuffeRL> create_pufferl_impl(HypersT& hypers,
         }
     }
 
-    create_static_threads(vec, hypers.num_threads, horizon, pufferl.get(),
-        net_callback_wrapper, thread_init_wrapper);
+    if (!cuda_rollout_fastpath_enabled_for_vec(vec)) {
+        create_static_threads(vec, hypers.num_threads, horizon, pufferl.get(),
+            net_callback_wrapper, thread_init_wrapper);
+    }
     static_vec_reset(vec);
 
     if (hypers.profile) {
