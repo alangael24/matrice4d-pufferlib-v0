@@ -146,6 +146,7 @@ void rollouts(pybind11::object pufferl_obj) {
         StaticVec* vec = pufferl.vec;
         HypersT& hypers = pufferl.hypers;
         cudaStream_t saved_tl_stream = tl_stream;
+        bool net_callback_steps_env = pufferl.rollout_graph_includes_env_step;
         double eval_gpu_ms = 0.0;
         double eval_env_ms = 0.0;
 
@@ -160,10 +161,12 @@ void rollouts(pybind11::object pufferl_obj) {
                 double step_t1 = wall_clock();
                 eval_gpu_ms += (step_t1 - step_t0) * 1000.0;
 
-                step_t0 = wall_clock();
-                cuda_env_step_buffer(vec, agent_start, vec->agents_per_buffer, stream);
-                step_t1 = wall_clock();
-                eval_env_ms += (step_t1 - step_t0) * 1000.0;
+                if (!net_callback_steps_env) {
+                    step_t0 = wall_clock();
+                    cuda_env_step_buffer(vec, agent_start, vec->agents_per_buffer, stream);
+                    step_t1 = wall_clock();
+                    eval_env_ms += (step_t1 - step_t0) * 1000.0;
+                }
             }
         }
 

@@ -326,6 +326,7 @@ typedef struct {
     int train_warmup;
     bool rollout_captured;
     bool train_captured;
+    bool rollout_graph_includes_env_step;
     ulong seed;
     curandStatePhilox4_32_10_t** rng_states;  // per-buffer persistent RNG states [num_buffers]
 } PuffeRL;
@@ -337,6 +338,18 @@ static inline bool cuda_rollout_fastpath_enabled_for_vec(StaticVec* vec) {
         && getenv("PUFFERLIB_DISABLE_CUDA_ROLLOUT_FASTPATH") == nullptr;
 #else
     (void)vec;
+    return false;
+#endif
+}
+
+static inline bool cuda_rollout_graph_env_step_enabled_for_vec(StaticVec* vec, int cudagraphs) {
+#ifdef ENV_CUDA
+    return cudagraphs >= 0
+        && cuda_rollout_fastpath_enabled_for_vec(vec)
+        && getenv("PUFFERLIB_DISABLE_CUDA_ROLLOUT_GRAPH_ENV_STEP") == nullptr;
+#else
+    (void)vec;
+    (void)cudagraphs;
     return false;
 #endif
 }
@@ -572,6 +585,12 @@ extern "C" void net_callback_wrapper(void* ctx, int buf, int t) {
     long act_cols = env.actions.shape[1];
     cast<<<grid_size(numel(act_slice.shape)), BLOCK_SIZE, 0, stream>>>(
             env.actions.data + start * act_cols, act_slice.data, numel(act_slice.shape));
+
+#ifdef ENV_CUDA
+    if (pufferl->rollout_graph_includes_env_step) {
+        cuda_env_step_buffer(pufferl->vec, start, block_size, stream);
+    }
+#endif
 
     if (capturing) {
         cudaGraph_t _graph;
@@ -1508,6 +1527,8 @@ std::unique_ptr<PuffeRL> create_pufferl_impl(HypersT& hypers,
     StaticVec* vec = create_environments(hypers.num_buffers, hypers.total_agents,
         env_name, vec_kwargs, env_kwargs, pufferl->env);
     pufferl->vec = vec;
+    pufferl->rollout_graph_includes_env_step =
+        cuda_rollout_graph_env_step_enabled_for_vec(vec, hypers.cudagraphs);
 
     // Sanity check action space
     int num_action_heads = pufferl->env.actions.shape[1];
