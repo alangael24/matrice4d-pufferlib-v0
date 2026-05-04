@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--reset-vel-max", type=float, default=0.0)
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--reset-state-interval", type=int, default=32)
     args = parser.parse_args()
 
     checkpoint = Path(args.checkpoint)
@@ -75,6 +76,9 @@ def main():
 
     try:
         while len(completed) < args.episodes:
+            sim_step = total_steps // vec.total_agents
+            if args.reset_state_interval > 0 and sim_step % args.reset_state_interval == 0:
+                state.zero_()
             actions, state = policy(obs, state)
             vec.cpu_step(actions.data_ptr())
             total_steps += vec.total_agents
@@ -153,6 +157,7 @@ def main():
             "reset_vel_max": args.reset_vel_max,
             "hidden_size": args.hidden_size,
             "num_layers": args.num_layers,
+            "reset_state_interval": args.reset_state_interval,
         },
         "final_metrics": final_metrics,
         "episode_summary": {

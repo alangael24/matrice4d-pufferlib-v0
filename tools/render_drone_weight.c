@@ -1,5 +1,5 @@
 #include "drone.h"
-#include "puffernet.h"
+#include "m4d_deployment_runtime.h"
 #include "render.h"
 
 #include <stdio.h>
@@ -81,6 +81,24 @@ static void configure_dr_medium(DroneEnv* env) {
     env->sensor_noise = 0.01f;
 }
 
+static void configure_dr_hard(DroneEnv* env) {
+    configure_common(env);
+
+    env->domain_randomization = 1.0f;
+    env->dr_mass = 0.20f;
+    env->dr_inertia = 0.40f;
+    env->dr_k_thrust = 0.40f;
+    env->dr_linear_drag = 0.80f;
+    env->dr_yaw_drag = 0.80f;
+    env->dr_motor_lag = 0.25f;
+    env->dr_com_xy = 0.04f;
+    env->dr_com_z = 0.05f;
+
+    env->action_scale = 0.7f;
+    env->action_latency = 0.02f;
+    env->sensor_noise = 0.02f;
+}
+
 static void configure_env(DroneEnv* env, const char* config) {
     if (strcmp(config, "baseline") == 0) {
         configure_baseline(env);
@@ -88,8 +106,10 @@ static void configure_env(DroneEnv* env, const char* config) {
         configure_dr_light(env);
     } else if (strcmp(config, "medium") == 0) {
         configure_dr_medium(env);
+    } else if (strcmp(config, "hard") == 0) {
+        configure_dr_hard(env);
     } else {
-        fprintf(stderr, "Unknown config '%s'; valid: baseline, light, medium\n", config);
+        fprintf(stderr, "Unknown config '%s'; valid: baseline, light, medium, hard\n", config);
         exit(2);
     }
 }
@@ -110,7 +130,7 @@ static float mean_last_returns(const float* returns, int count) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr,
-                "Usage: %s WEIGHTS.bin [frames] [baseline|light|medium] [action_scale]\\n",
+                "Usage: %s WEIGHTS.bin [frames] [baseline|light|medium|hard] [action_scale]\\n",
                 argv[0]);
         return 2;
     }
@@ -141,13 +161,11 @@ int main(int argc, char** argv) {
     env->rewards = (float*)calloc(env->num_agents, sizeof(float));
     env->terminals = (float*)calloc(env->num_agents, sizeof(float));
 
-    Weights* weights = load_weights(weights_path);
-    if (weights == NULL) {
+    M4DDeploymentRuntime policy;
+    if (m4d_deploy_init(&policy, weights_path, env->num_agents, reset_state_interval,
+                        env->action_scale) != 0) {
         return 1;
     }
-
-    int logit_sizes[4] = {1, 1, 1, 1};
-    PufferNet* net = make_puffernet(weights, env->num_agents, obs_size, 128, 3, logit_sizes, 4);
 
     init(env);
     c_reset(env);
@@ -160,12 +178,7 @@ int main(int argc, char** argv) {
     int episode_lengths[4] = {0};
     float last_returns[20] = {0};
     while (!WindowShouldClose()) {
-        if (reset_state_interval > 0 && frame % reset_state_interval == 0) {
-            memset(net->mingru->state, 0,
-                   (size_t)net->mingru->num_layers * net->mingru->batch_size *
-                       net->mingru->hidden_size * sizeof(float));
-        }
-        forward_puffernet(net, env->observations, env->actions);
+        m4d_deploy_forward(&policy, env->observations, env->actions);
         c_step(env);
 
         for (int i = 0; i < env->num_agents; i++) {
@@ -196,8 +209,7 @@ int main(int argc, char** argv) {
     }
 
     c_close(env);
-    free_puffernet(net);
-    free(weights);
+    m4d_deploy_close(&policy);
     free(env->observations);
     free(env->actions);
     free(env->rewards);

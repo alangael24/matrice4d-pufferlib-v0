@@ -38,6 +38,8 @@ class NativeMinGRUPolicy(torch.nn.Module):
         self.num_actions = num_actions
 
         weights = np.fromfile(checkpoint, dtype=np.float32)
+        original_size = weights.size
+        weights = np.concatenate([weights, np.zeros(7, dtype=np.float32)])
         offset = 0
 
         def take(shape):
@@ -47,6 +49,7 @@ class NativeMinGRUPolicy(torch.nn.Module):
                 raise ValueError(f"Checkpoint ended early at {offset}; need {count} more floats")
             out = torch.from_numpy(weights[offset : offset + count].copy()).reshape(shape)
             offset += count
+            offset = (offset + 7) & ~7
             return out
 
         self.encoder_weight = torch.nn.Parameter(take((hidden_size, obs_size)), requires_grad=False)
@@ -56,8 +59,8 @@ class NativeMinGRUPolicy(torch.nn.Module):
             [torch.nn.Parameter(take((3 * hidden_size, hidden_size)), requires_grad=False) for _ in range(num_layers)]
         )
 
-        if offset != weights.size:
-            raise ValueError(f"Checkpoint has {weights.size - offset} unused floats")
+        if offset > original_size + 7:
+            raise ValueError(f"Aligned checkpoint parser exceeded padded size at offset {offset}")
 
     def initial_state(self, batch_size):
         return torch.zeros(self.num_layers, batch_size, self.hidden_size)
@@ -131,6 +134,7 @@ def main():
     parser.add_argument("--reset-vel-max", type=float, default=0.0)
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--reset-state-interval", type=int, default=32)
     parser.add_argument("--fps", type=float, default=60.0)
     parser.add_argument("--camera-distance", type=float, default=3.0)
     parser.add_argument("--camera-elevation", type=float, default=0.35)
@@ -178,6 +182,8 @@ def main():
             if not args.no_render:
                 vec.render(0)
 
+            if args.reset_state_interval > 0 and step % args.reset_state_interval == 0:
+                state.zero_()
             actions, state = policy(obs, state)
             vec.cpu_step(actions.data_ptr())
 

@@ -6,19 +6,19 @@ cd "$ROOT_DIR"
 
 EPISODES="${EPISODES:-8192}"
 NUM_AGENTS="${NUM_AGENTS:-64}"
-RESET_STATE_INTERVAL="${RESET_STATE_INTERVAL:-0}"
+RESET_STATE_INTERVAL="${RESET_STATE_INTERVAL:-32}"
 OUT_DIR="${OUT_DIR:-/Users/alan/matrice4d_experiments/reports}"
 RUN_ID="${RUN_ID:-matrix_a_action_scale_sweep_8192}"
 OUT_CSV="${OUT_CSV:-$OUT_DIR/${RUN_ID}.csv}"
 LOG_DIR="${LOG_DIR:-$OUT_DIR/${RUN_ID}_logs}"
 
-POLICY_A="${POLICY_A:-/Users/alan/matrice4d_experiments/reports/v0_14_dr_medium_full_0p01_5seeds_200m_from_seed44_no_noise_300m_extract/v0_14_dr_medium_full_0p01_5seeds_200m_from_seed44_no_noise_300m/v0_11_target5_dr_medium_full_scale07_seed44_200000000/checkpoints/drone/1777768041678/0000000199884800.bin}"
+POLICY_A="${POLICY_A:-/Users/alan/matrice4d_experiments/release_assets/v0.14-dr-medium-robust-baseline/v0_14_dr_medium_robust_seed44_scale0.7_reset32_latest.bin}"
 POLICY_B="${POLICY_B:-/Users/alan/matrice4d_experiments/release_assets/v0.10-target5-baseline/v0_10_target5_seed46_scale0.5_yawMult5_vec4096x8x32_100m_latest.bin}"
 
 mkdir -p "$OUT_DIR" "$LOG_DIR" build
 
 clang -O3 -DNDEBUG -Wall -Werror=return-type -Wno-unused-function -Wno-unused-variable \
-  -I./src -I./vendor -I./ocean/drone \
+  -I./tools -I./src -I./vendor -I./ocean/drone \
   tools/eval_drone_weight.c -lm -lpthread -o build/eval_drone_weight
 
 printf 'policy,policy_path,config,action_scale,num_agents,episodes,mean_return,std_return,min_return,max_return,timeout_rate,oob_rate,mean_len,deterministic,reset_state_interval\n' > "$OUT_CSV"
