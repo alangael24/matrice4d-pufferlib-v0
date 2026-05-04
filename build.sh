@@ -228,9 +228,11 @@ if [ -z "$NCCL_LFLAG" ]; then
 fi
 
 WHEEL_RPATH_FLAGS=()
+NVCC_WHEEL_RPATH_FLAGS=()
 for lib_flag in "$CUDNN_LFLAG" "$NCCL_LFLAG"; do
     if [[ "$lib_flag" == -L* ]]; then
         WHEEL_RPATH_FLAGS+=("-Wl,-rpath,${lib_flag#-L}")
+        NVCC_WHEEL_RPATH_FLAGS+=("-Xlinker" "-rpath" "-Xlinker" "${lib_flag#-L}")
     fi
 done
 
@@ -381,7 +383,7 @@ elif [ "$MODE" = "profile" ]; then
         "${PROFILE_OBJECTS[@]}" \
         "$STATIC_LIB" "$RAYLIB_A" \
         -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG \
-        "${WHEEL_RPATH_FLAGS[@]}" \
+        "${NVCC_WHEEL_RPATH_FLAGS[@]}" \
         -lnccl -lnvidia-ml -lcublas -lcurand "$CUDNN_LIB_ARG" \
         -lGL -lm -lpthread $OMP_LIB \
         -o profile
