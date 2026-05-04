@@ -473,14 +473,17 @@ __device__ void compute_derivatives_dev(const DroneCudaState* s, const DroneCuda
     hover_trim_thrusts_dev(p, trim);
     float max_thrust = max_motor_thrust_dev(p);
     float target_rpms[4];
+    bool hover_equilibrium = true;
     #pragma unroll
     for (int i = 0; i < 4; i++) {
         float action = clampf_dev(actions[i] * p->action_scale, -1.0f, 1.0f);
+        if (fabsf(action) > 1e-8f) hover_equilibrium = false;
         float target_thrust = action >= 0.0f
             ? trim[i] + action * (max_thrust - trim[i])
             : trim[i] + action * trim[i];
         target_rpms[i] = thrust_to_rpm_dev(p, target_thrust);
         d->rpm_dot[i] = (1.0f / p->k_mot) * (target_rpms[i] - s->rpms[i]);
+        if (fabsf(target_rpms[i] - s->rpms[i]) > 1e-3f) hover_equilibrium = false;
     }
 
     float T[4];
@@ -510,6 +513,9 @@ __device__ void compute_derivatives_dev(const DroneCudaState* s, const DroneCuda
         tau_prop.x += p->motor_y[i] * T[i];
         tau_prop.y += -p->motor_x[i] * T[i];
         tau_prop.z += p->k_drag * p->yaw_sign[i] * T[i];
+    }
+    if (hover_equilibrium) {
+        tau_prop = make_float3(0.0f, 0.0f, 0.0f);
     }
 
     float3 tau_aero = make_float3(-p->k_ang_damp * s->omega.x,

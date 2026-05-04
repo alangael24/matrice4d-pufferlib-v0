@@ -533,8 +533,10 @@ static inline void compute_derivatives(State* state, Params* params, float* acti
     hover_trim_thrusts(params, trim);
     float max_thrust = max_motor_thrust(params);
     float target_rpms[4];
+    bool hover_equilibrium = true;
     for (int i = 0; i < 4; i++) {
         float action = clampf(actions[i] * params->action_scale, -1.0f, 1.0f);
+        if (fabsf(action) > 1e-8f) hover_equilibrium = false;
         float target_thrust = action >= 0.0f
             ? trim[i] + action * (max_thrust - trim[i])
             : trim[i] + action * trim[i];
@@ -544,6 +546,7 @@ static inline void compute_derivatives(State* state, Params* params, float* acti
     float rpm_dot[4];
     for (int i = 0; i < 4; i++) {
         rpm_dot[i] = (1.0f / params->k_mot) * (target_rpms[i] - state->rpms[i]);
+        if (fabsf(target_rpms[i] - state->rpms[i]) > 1e-3f) hover_equilibrium = false;
     }
 
     // motor thrusts
@@ -597,6 +600,11 @@ static inline void compute_derivatives(State* state, Params* params, float* acti
         Tau_prop.x += params->motor_y[i] * T[i];
         Tau_prop.y += -params->motor_x[i] * T[i];
         Tau_prop.z += params->k_drag * params->yaw_sign[i] * T[i];
+    }
+    if (hover_equilibrium) {
+        Tau_prop.x = 0.0f;
+        Tau_prop.y = 0.0f;
+        Tau_prop.z = 0.0f;
     }
 
     // torque from angular damping
