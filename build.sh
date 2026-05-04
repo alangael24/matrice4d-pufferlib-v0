@@ -380,6 +380,8 @@ elif [ "$MODE" = "profile" ]; then
         tests/profile_kernels.cu vendor/ini.c \
         "${PROFILE_OBJECTS[@]}" \
         "$STATIC_LIB" "$RAYLIB_A" \
+        -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG \
+        "${WHEEL_RPATH_FLAGS[@]}" \
         -lnccl -lnvidia-ml -lcublas -lcurand "$CUDNN_LIB_ARG" \
         -lGL -lm -lpthread $OMP_LIB \
         -o profile
