@@ -147,6 +147,10 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
     speed = payload["speed"]
     train_rows = payload["training"]["runs"]
 
+    def check_row(label: str, key: str, detail: str) -> str:
+        row = correctness.get(key, {})
+        return f"| {label} | {row.get('passed')} | {detail} |"
+
     lines = [
         "# CUDA Env Benchmark",
         "",
@@ -155,7 +159,9 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "| Check | Passed | Detail |",
         "| --- | ---: | --- |",
         f"| Matrice 4D V0 | {correctness['v0_checks'].get('passed')} | hover_rpm={correctness['v0_checks'].get('hover_rpm')} |",
-        f"| CPU vs CUDA parity | {correctness['cuda_checks'].get('passed')} | see correctness/cuda_checks.txt |",
+        check_row("CPU vs CUDA zero-action 1000", "cuda_zero_action_1000", "required; see correctness/cuda_zero_action_1000.txt"),
+        check_row("CPU vs CUDA amp=0.05 200", "cuda_amp005_200", "required; see correctness/cuda_amp005_200.txt"),
+        check_row("CPU vs CUDA amp=0.05 1000", "cuda_amp005_1000_diagnostic", "non-blocking diagnostic; see correctness/cuda_amp005_1000_diagnostic.txt"),
         "",
         "## Speed",
         "",
@@ -198,13 +204,18 @@ def main() -> int:
     train_summary = load_train_summary(bench / "train_summary.json")
     cpu_speed = parse_envspeed(bench / "speed" / "envspeed_cpu_env.txt")
     cuda_speed = parse_envspeed(bench / "speed" / "envspeed_cuda_env.txt")
+    smoke_path = bench / "correctness" / "cuda_amp005_200.txt"
+    legacy_smoke_path = bench / "correctness" / "cuda_checks.txt"
     payload = {
         "bench_root": str(bench),
         "metadata": read_env(bench / "benchmark_metadata.env"),
         "git_commit": read_text(bench / "git_commit.txt").strip(),
         "correctness": {
             "v0_checks": parse_v0_checks(bench / "correctness" / "matrice4d_v0_checks.txt"),
-            "cuda_checks": parse_cuda_checks(bench / "correctness" / "cuda_checks.txt"),
+            "cuda_checks": parse_cuda_checks(smoke_path if smoke_path.exists() else legacy_smoke_path),
+            "cuda_zero_action_1000": parse_cuda_checks(bench / "correctness" / "cuda_zero_action_1000.txt"),
+            "cuda_amp005_200": parse_cuda_checks(smoke_path if smoke_path.exists() else legacy_smoke_path),
+            "cuda_amp005_1000_diagnostic": parse_cuda_checks(bench / "correctness" / "cuda_amp005_1000_diagnostic.txt"),
         },
         "speed": {
             "cpu_env": cpu_speed,

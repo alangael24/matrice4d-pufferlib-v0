@@ -20,9 +20,19 @@ RUN_TRAIN="${RUN_TRAIN:-1}"
 RUN_CPU_TRAIN="${RUN_CPU_TRAIN:-1}"
 RUN_CUDA_TRAIN="${RUN_CUDA_TRAIN:-1}"
 
-CUDA_CHECK_STEPS="${CUDA_CHECK_STEPS:-200}"
-CUDA_CHECK_AGENTS="${CUDA_CHECK_AGENTS:-128}"
-CUDA_CHECK_ACTION_AMPLITUDE="${CUDA_CHECK_ACTION_AMPLITUDE:-0.05}"
+CUDA_ZERO_STEPS="${CUDA_ZERO_STEPS:-1000}"
+CUDA_ZERO_AGENTS="${CUDA_ZERO_AGENTS:-128}"
+CUDA_ZERO_OBS_TOL="${CUDA_ZERO_OBS_TOL:-1e-6}"
+CUDA_ZERO_REWARD_TOL="${CUDA_ZERO_REWARD_TOL:-1e-5}"
+
+CUDA_SMOKE_STEPS="${CUDA_SMOKE_STEPS:-${CUDA_CHECK_STEPS:-200}}"
+CUDA_SMOKE_AGENTS="${CUDA_SMOKE_AGENTS:-${CUDA_CHECK_AGENTS:-128}}"
+CUDA_SMOKE_ACTION_AMPLITUDE="${CUDA_SMOKE_ACTION_AMPLITUDE:-${CUDA_CHECK_ACTION_AMPLITUDE:-0.05}}"
+
+CUDA_DIAG_STEPS="${CUDA_DIAG_STEPS:-1000}"
+CUDA_DIAG_AGENTS="${CUDA_DIAG_AGENTS:-128}"
+CUDA_DIAG_ACTION_AMPLITUDE="${CUDA_DIAG_ACTION_AMPLITUDE:-0.05}"
+CUDA_DIAG_DUMP_STATE="${CUDA_DIAG_DUMP_STATE:-1}"
 
 PROFILE_BUFFERS="${PROFILE_BUFFERS:-8}"
 PROFILE_THREADS="${PROFILE_THREADS:-32}"
@@ -85,6 +95,27 @@ run_logged() {
   fi
 }
 
+run_diagnostic_logged() {
+  local label="$1"
+  local out="$2"
+  shift 2
+
+  mkdir -p "$(dirname "$out")"
+  write_command "${out}.cmd" "$@"
+
+  echo
+  echo "### $label"
+  set +e
+  "$@" 2>&1 | tee "$out"
+  local status="${PIPESTATUS[0]}"
+  set -e
+  echo "$status" > "${out}.exit_code"
+
+  if [[ "$status" != "0" ]]; then
+    echo "Diagnostic failed (non-blocking): $label (exit $status)" | tee -a "$BENCH_ROOT/diagnostics.txt"
+  fi
+}
+
 write_root_metadata() {
   git rev-parse HEAD > "$BENCH_ROOT/git_commit.txt"
   git status --short --branch > "$BENCH_ROOT/git_status.txt"
@@ -100,8 +131,16 @@ write_root_metadata() {
     echo "run_train=$RUN_TRAIN"
     echo "run_cpu_train=$RUN_CPU_TRAIN"
     echo "run_cuda_train=$RUN_CUDA_TRAIN"
-    echo "cuda_check_steps=$CUDA_CHECK_STEPS"
-    echo "cuda_check_agents=$CUDA_CHECK_AGENTS"
+    echo "cuda_zero_steps=$CUDA_ZERO_STEPS"
+    echo "cuda_zero_agents=$CUDA_ZERO_AGENTS"
+    echo "cuda_zero_obs_tol=$CUDA_ZERO_OBS_TOL"
+    echo "cuda_zero_reward_tol=$CUDA_ZERO_REWARD_TOL"
+    echo "cuda_smoke_steps=$CUDA_SMOKE_STEPS"
+    echo "cuda_smoke_agents=$CUDA_SMOKE_AGENTS"
+    echo "cuda_smoke_action_amplitude=$CUDA_SMOKE_ACTION_AMPLITUDE"
+    echo "cuda_diag_steps=$CUDA_DIAG_STEPS"
+    echo "cuda_diag_agents=$CUDA_DIAG_AGENTS"
+    echo "cuda_diag_action_amplitude=$CUDA_DIAG_ACTION_AMPLITUDE"
     echo "profile_buffers=$PROFILE_BUFFERS"
     echo "profile_threads=$PROFILE_THREADS"
     echo "profile_horizon=$PROFILE_HORIZON"
@@ -112,7 +151,7 @@ write_root_metadata() {
     echo "num_buffers=$NUM_BUFFERS"
     echo "num_threads=$NUM_THREADS"
     echo "num_drones=$NUM_DRONES"
-    echo "success_correctness=matrice4d_v0_checks passed and cuda_checks passed"
+    echo "success_correctness=matrice4d_v0_checks, 1000-step zero-action parity, and 200-step amp=0.05 parity passed"
     echo "success_speed=cuda envspeed throughput greater than cpu envspeed throughput"
     echo "success_quality=cuda reaches similar env metrics in lower wall-clock time"
   } > "$BENCH_ROOT/benchmark_metadata.env"
@@ -158,12 +197,36 @@ run_correctness() {
     "$BENCH_ROOT/build/build_cuda.txt" \
     bash build.sh "$ENV_NAME"
 
-  run_logged "CPU vs CUDA numeric parity" \
-    "$BENCH_ROOT/correctness/cuda_checks.txt" \
+  run_logged "CPU vs CUDA zero-action parity" \
+    "$BENCH_ROOT/correctness/cuda_zero_action_1000.txt" \
     env CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON_BIN" ocean/drone/cuda_checks.py \
-      --steps "$CUDA_CHECK_STEPS" \
-      --num-agents "$CUDA_CHECK_AGENTS" \
-      --action-amplitude "$CUDA_CHECK_ACTION_AMPLITUDE"
+      --steps "$CUDA_ZERO_STEPS" \
+      --num-agents "$CUDA_ZERO_AGENTS" \
+      --action-amplitude 0.0 \
+      --obs-tol "$CUDA_ZERO_OBS_TOL" \
+      --reward-tol "$CUDA_ZERO_REWARD_TOL"
+
+  run_logged "CPU vs CUDA amp=0.05 smoke parity" \
+    "$BENCH_ROOT/correctness/cuda_amp005_200.txt" \
+    env CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON_BIN" ocean/drone/cuda_checks.py \
+      --steps "$CUDA_SMOKE_STEPS" \
+      --num-agents "$CUDA_SMOKE_AGENTS" \
+      --action-amplitude "$CUDA_SMOKE_ACTION_AMPLITUDE"
+
+  mkdir -p "$BENCH_ROOT/correctness/diagnostics"
+  local diag_cmd=(
+    env CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON_BIN" ocean/drone/cuda_checks.py
+    --steps "$CUDA_DIAG_STEPS"
+    --num-agents "$CUDA_DIAG_AGENTS"
+    --action-amplitude "$CUDA_DIAG_ACTION_AMPLITUDE"
+    --dump-diffs "$BENCH_ROOT/correctness/diagnostics/cuda_amp005_1000.csv"
+  )
+  if [[ "$CUDA_DIAG_DUMP_STATE" == "1" ]]; then
+    diag_cmd+=(--dump-state)
+  fi
+  run_diagnostic_logged "CPU vs CUDA amp=0.05 1000-step diagnostic" \
+    "$BENCH_ROOT/correctness/cuda_amp005_1000_diagnostic.txt" \
+    "${diag_cmd[@]}"
 }
 
 run_speed() {
