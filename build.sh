@@ -172,6 +172,7 @@ fi
 CUDA_HOME=${CUDA_HOME:-${CUDA_PATH:-$(dirname "$(dirname "$(which nvcc)")")}}
 CUDNN_IFLAG=""
 CUDNN_LFLAG=""
+CUDNN_LIB_ARG="-lcudnn"
 for dir in /usr/local/cuda/include /usr/include; do
     if [ -f "$dir/cudnn.h" ]; then
         CUDNN_IFLAG="-I$dir"
@@ -181,6 +182,13 @@ done
 for dir in /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu; do
     if [ -f "$dir/libcudnn.so" ]; then
         CUDNN_LFLAG="-L$dir"
+        CUDNN_LIB_ARG="-lcudnn"
+        break
+    fi
+    CUDNN_VERSIONED=$(ls "$dir"/libcudnn.so.* 2>/dev/null | sort | tail -1 || true)
+    if [ -n "$CUDNN_VERSIONED" ]; then
+        CUDNN_LFLAG="-L$dir"
+        CUDNN_LIB_ARG="-l:$(basename "$CUDNN_VERSIONED")"
         break
     fi
 done
@@ -188,7 +196,18 @@ if [ -z "$CUDNN_IFLAG" ]; then
     CUDNN_IFLAG=$(python -c "import nvidia.cudnn, os; print('-I' + os.path.join(nvidia.cudnn.__path__[0], 'include'))" 2>/dev/null || echo "")
 fi
 if [ -z "$CUDNN_LFLAG" ]; then
-    CUDNN_LFLAG=$(python -c "import nvidia.cudnn, os; print('-L' + os.path.join(nvidia.cudnn.__path__[0], 'lib'))" 2>/dev/null || echo "")
+    CUDNN_WHEEL_LIB=$(python -c "import nvidia.cudnn, os; print(os.path.join(nvidia.cudnn.__path__[0], 'lib'))" 2>/dev/null || echo "")
+    if [ -n "$CUDNN_WHEEL_LIB" ]; then
+        CUDNN_LFLAG="-L$CUDNN_WHEEL_LIB"
+        if [ -f "$CUDNN_WHEEL_LIB/libcudnn.so" ]; then
+            CUDNN_LIB_ARG="-lcudnn"
+        else
+            CUDNN_VERSIONED=$(ls "$CUDNN_WHEEL_LIB"/libcudnn.so.* 2>/dev/null | sort | tail -1 || true)
+            if [ -n "$CUDNN_VERSIONED" ]; then
+                CUDNN_LIB_ARG="-l:$(basename "$CUDNN_VERSIONED")"
+            fi
+        fi
+    fi
 fi
 
 # NCCL include/lib fallback (mirrors the cuDNN fallback above).
@@ -301,7 +320,7 @@ if [ -z "$MODE" ]; then
         "${LINK_OBJECTS[@]}" "$STATIC_LIB" "$RAYLIB_A"
         -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG
         "${WHEEL_RPATH_FLAGS[@]}"
-        -lcudart -lnccl -lnvidia-ml -lcublas -lcusolver -lcurand -lcudnn
+        -lcudart -lnccl -lnvidia-ml -lcublas -lcusolver -lcurand "$CUDNN_LIB_ARG"
         $OMP_LIB $LINK_OPT
         "${SHARED_LDFLAGS[@]}"
         -o "$OUTPUT"
@@ -361,7 +380,7 @@ elif [ "$MODE" = "profile" ]; then
         tests/profile_kernels.cu vendor/ini.c \
         "${PROFILE_OBJECTS[@]}" \
         "$STATIC_LIB" "$RAYLIB_A" \
-        -lnccl -lnvidia-ml -lcublas -lcurand -lcudnn \
+        -lnccl -lnvidia-ml -lcublas -lcurand "$CUDNN_LIB_ARG" \
         -lGL -lm -lpthread $OMP_LIB \
         -o profile
     echo "Built: ./profile"

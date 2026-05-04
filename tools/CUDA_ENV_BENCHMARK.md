@@ -31,10 +31,17 @@ Defaults:
 ```text
 SEEDS=42
 TOTAL_TIMESTEPS=3000000
+CUDA_CHECK_STEPS=200
 PROFILE_TOTAL_AGENTS=32768
 PROFILE_BUFFERS=8
 PROFILE_THREADS=32
 PROFILE_HORIZON=256
+```
+
+`CUDA_CHECK_STEPS=200` is the strict smoke gate. Longer open-loop checks can be run manually, for example:
+
+```bash
+CUDA_CHECK_STEPS=1000 RUN_TRAIN=0 bash tools/benchmark_cuda_env.sh
 ```
 
 Para cinco seeds:

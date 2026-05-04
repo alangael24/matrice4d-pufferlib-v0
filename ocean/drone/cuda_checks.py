@@ -3,9 +3,14 @@ import argparse
 import ctypes
 import ctypes.util
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from pufferlib import _C
 from tools.drone_realtime_viewer import tensor_from_ptr

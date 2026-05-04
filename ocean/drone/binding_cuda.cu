@@ -1,5 +1,12 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
+#include <cuda_bf16.h>
+
+#ifdef PRECISION_FLOAT
+typedef float precision_t;
+#else
+typedef __nv_bfloat16 precision_t;
+#endif
 
 #include <math.h>
 #include <stdio.h>
