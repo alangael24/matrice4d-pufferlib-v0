@@ -126,6 +126,18 @@ static void configure_baseline(DroneEnv* env, int num_agents) {
     env->dr_com_z = 0.0f;
 }
 
+static void configure_nominal_normalized(DroneEnv* env, int num_agents) {
+    configure_baseline(env, num_agents);
+
+    env->alpha_omega_z_mult = 5.0f;
+    env->action_scale = 1.0f;
+    env->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    env->normalized_thrust_min = 0.0f;
+    env->normalized_thrust_max = 0.85f;
+    env->reset_yaw_range = 3.14159f;
+    env->reset_vel_max = 0.2f;
+}
+
 static void configure_dr_light(DroneEnv* env, int num_agents) {
     configure_common(env, num_agents);
 
@@ -257,9 +269,79 @@ static void configure_dr_family_v05(DroneEnv* env, int num_agents) {
     env->sensor_noise = 0.0f;
 }
 
+static void configure_low_authority_holdout(DroneEnv* env, int num_agents) {
+    configure_dr_family_v05(env, num_agents);
+
+    env->dr_usable_t2w_min = 1.50f;
+    env->dr_usable_t2w_max = 1.80f;
+}
+
+static void configure_motor_tau_high_holdout(DroneEnv* env, int num_agents) {
+    configure_dr_family_v05(env, num_agents);
+
+    env->dr_motor_tau_min = 0.20f;
+    env->dr_motor_tau_max = 0.35f;
+}
+
+static void configure_mass_high_holdout(DroneEnv* env, int num_agents) {
+    configure_dr_family_v05(env, num_agents);
+
+    env->dr_mass_min = 1.15f;
+    env->dr_mass_max = 1.35f;
+}
+
+static void recompute_hover_rpms(Drone* agent) {
+    float trim[4];
+    hover_trim_thrusts(&agent->params, trim);
+    for (int i = 0; i < 4; i++) {
+        agent->state.rpms[i] = thrust_to_rpm_i(&agent->params, i, trim[i]);
+    }
+}
+
+static void apply_fixed_motor_profile(Drone* agent, const float scales[4], float k_thrust_mult,
+                                      float normalized_thrust_max) {
+    Params* p = &agent->params;
+    p->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    p->action_scale = 1.0f;
+    p->normalized_thrust_min = 0.0f;
+    p->normalized_thrust_max = normalized_thrust_max;
+    p->k_thrust = BASE_K_THRUST * k_thrust_mult;
+    p->k_thrust_mult = k_thrust_mult;
+    p->mass_mult = p->mass / BASE_MASS;
+    for (int i = 0; i < 4; i++) {
+        p->motor_thrust_scale[i] = scales[i];
+    }
+    recompute_hover_rpms(agent);
+}
+
+static void apply_eval_profile_after_reset(DroneEnv* env, Drone* agent, const char* config) {
+    (void)env;
+    if (strcmp(config, "mixed_motors_mild") == 0) {
+        const float scales[4] = {1.00f, 0.92f, 0.98f, 1.05f};
+        apply_fixed_motor_profile(agent, scales, 1.0f, 0.85f);
+    } else if (strcmp(config, "3plus1_mismatch") == 0 ||
+               strcmp(config, "three_plus_one_mismatch") == 0) {
+        const float scales[4] = {1.00f, 0.92f, 0.92f, 0.92f};
+        apply_fixed_motor_profile(agent, scales, 1.0f, 0.85f);
+    } else if (strcmp(config, "capped_high_thrust") == 0 ||
+               strcmp(config, "mad_bsc_capped") == 0) {
+        const float scales[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        apply_fixed_motor_profile(agent, scales, 2.91f, 0.50f);
+    }
+}
+
+static void apply_eval_profile_all(DroneEnv* env, const char* config) {
+    for (int i = 0; i < env->num_agents; i++) {
+        apply_eval_profile_after_reset(env, &env->agents[i], config);
+    }
+    compute_observations(env);
+}
+
 static void configure_env(DroneEnv* env, const char* config, int num_agents) {
     if (strcmp(config, "baseline") == 0) {
         configure_baseline(env, num_agents);
+    } else if (strcmp(config, "nominal") == 0) {
+        configure_nominal_normalized(env, num_agents);
     } else if (strcmp(config, "light") == 0) {
         configure_dr_light(env, num_agents);
     } else if (strcmp(config, "narrow20") == 0) {
@@ -268,15 +350,31 @@ static void configure_env(DroneEnv* env, const char* config, int num_agents) {
         configure_dr_medium(env, num_agents);
     } else if (strcmp(config, "hard") == 0) {
         configure_dr_hard(env, num_agents);
-    } else if (strcmp(config, "family_v1") == 0) {
+    } else if (strcmp(config, "family_v1") == 0 ||
+               strcmp(config, "family_v1_holdout_raw") == 0) {
         configure_dr_family_v1(env, num_agents);
     } else if (strcmp(config, "family_v05") == 0 ||
                strcmp(config, "family_v0.5_authority_gated") == 0) {
         configure_dr_family_v05(env, num_agents);
+    } else if (strcmp(config, "low_authority_holdout") == 0) {
+        configure_low_authority_holdout(env, num_agents);
+    } else if (strcmp(config, "motor_tau_high_holdout") == 0) {
+        configure_motor_tau_high_holdout(env, num_agents);
+    } else if (strcmp(config, "mass_high_holdout") == 0) {
+        configure_mass_high_holdout(env, num_agents);
+    } else if (strcmp(config, "mixed_motors_mild") == 0 ||
+               strcmp(config, "3plus1_mismatch") == 0 ||
+               strcmp(config, "three_plus_one_mismatch") == 0 ||
+               strcmp(config, "capped_high_thrust") == 0 ||
+               strcmp(config, "mad_bsc_capped") == 0) {
+        configure_nominal_normalized(env, num_agents);
     } else {
         fprintf(stderr,
-                "Unknown config '%s'; valid: baseline, light, narrow20, medium, hard, "
-                "family_v1, family_v05\n",
+                "Unknown config '%s'; valid: baseline, nominal, light, narrow20, medium, "
+                "hard, family_v1, family_v1_holdout_raw, family_v05, "
+                "family_v0.5_authority_gated, low_authority_holdout, "
+                "motor_tau_high_holdout, mass_high_holdout, mixed_motors_mild, "
+                "3plus1_mismatch, capped_high_thrust\n",
                 config);
         exit(2);
     }
@@ -294,7 +392,7 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr,
                 "Usage: %s WEIGHTS.bin [episodes] "
-                "[baseline|light|narrow20|medium|hard|family_v1|family_v05] [action_scale] "
+                "[baseline|nominal|light|narrow20|medium|hard|family_v1|family_v05|holdout] [action_scale] "
                 "[num_agents]\n",
                 argv[0]);
         return 2;
@@ -427,7 +525,11 @@ int main(int argc, char** argv) {
     float* snap_action_cap = (float*)calloc(env->num_agents, sizeof(float));
     FloatVec dist_samples = {0};
     FloatVec omega_samples = {0};
+    FloatVec action_delta_samples = {0};
+    FloatVec reset_jump_samples = {0};
     int step = 0;
+
+    apply_eval_profile_all(env, config);
 
     while (completed < target_episodes) {
         count_nonfinite_array(env->observations, (size_t)env->num_agents * obs_size,
@@ -501,6 +603,7 @@ int main(int argc, char** argv) {
                 reset_jump_sum += jump;
                 if (jump > reset_jump_max) reset_jump_max = jump;
                 reset_jump_count += 1;
+                float_vec_push(&reset_jump_samples, jump);
                 ep_reset_jump_sum[i] += jump;
                 ep_reset_jump_count[i] += 1;
             }
@@ -528,6 +631,7 @@ int main(int argc, char** argv) {
                 float mean_delta = 0.25f * delta;
                 action_delta_sum += mean_delta;
                 action_delta_count += 1;
+                float_vec_push(&action_delta_samples, mean_delta);
                 ep_action_delta_sum[i] += mean_delta;
                 ep_action_delta_count[i] += 1;
             }
@@ -582,6 +686,7 @@ int main(int argc, char** argv) {
         }
         step += 1;
 
+        int reset_profile_changed = 0;
         for (int i = 0; i < env->num_agents; i++) {
             episode_returns[i] += env->rewards[i];
             episode_lengths[i] += 1;
@@ -646,11 +751,16 @@ int main(int argc, char** argv) {
                 ep_reset_jump_count[i] = 0;
                 ep_max_dist[i] = 0.0f;
                 ep_max_omega[i] = 0.0f;
+                apply_eval_profile_after_reset(env, &env->agents[i], config);
+                reset_profile_changed = 1;
 
                 if (completed >= target_episodes) {
                     break;
                 }
             }
+        }
+        if (reset_profile_changed) {
+            compute_observations(env);
         }
     }
 
@@ -667,6 +777,8 @@ int main(int argc, char** argv) {
     float p99_dist = percentile(&dist_samples, 0.99f);
     float p95_omega = percentile(&omega_samples, 0.95f);
     float p99_omega = percentile(&omega_samples, 0.99f);
+    float p95_action_delta = percentile(&action_delta_samples, 0.95f);
+    float p95_reset_jump = percentile(&reset_jump_samples, 0.95f);
     double mean_abs_delta_action =
         action_delta_count > 0 ? action_delta_sum / (double)action_delta_count : 0.0;
     double reset32_action_jump =
@@ -688,9 +800,11 @@ int main(int argc, char** argv) {
                env->log.mean_abs_action / n, env->log.action_saturation_frac / n,
                env->log.motor_clip_low_frac / n, env->log.motor_clip_high_frac / n);
     }
-    printf("smoothness mean_abs_delta_action=%.6f reset32_action_jump=%.6f "
+    printf("smoothness mean_abs_delta_action=%.6f mean_abs_delta_action_p95=%.6f "
+           "reset32_action_jump=%.6f reset32_action_jump_p95=%.6f "
            "reset32_action_jump_max=%.6f reset32_action_jump_count=%ld\n",
-           mean_abs_delta_action, reset32_action_jump, reset_jump_max, reset_jump_count);
+           mean_abs_delta_action, p95_action_delta, reset32_action_jump, p95_reset_jump,
+           reset_jump_max, reset_jump_count);
     printf("percentiles p95_dist=%.6f p99_dist=%.6f p95_omega=%.6f p99_omega=%.6f "
            "samples=%zu nan_inf_count=%ld\n",
            p95_dist, p99_dist, p95_omega, p99_omega, dist_samples.len, nan_inf_count);
@@ -706,6 +820,16 @@ int main(int argc, char** argv) {
            env->log.n > 0.0f ? env->log.mean_abs_action / env->log.n : 0.0f,
            env->log.n > 0.0f ? env->log.action_saturation_frac / env->log.n : 0.0f,
            mean_abs_delta_action, p95_dist, p99_dist, p95_omega, p99_omega, nan_inf_count);
+    printf("csv_clean,%s,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+           "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%ld\n",
+           config, env->action_scale, env->num_agents, completed, oob_rate, timeout_rate,
+           env->log.n > 0.0f ? env->log.ema_dist / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.ema_vel / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.ema_omega_z / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.mean_abs_action / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.action_saturation_frac / env->log.n : 0.0f,
+           mean_abs_delta_action, p95_action_delta, reset32_action_jump, p95_reset_jump,
+           p95_dist, p99_dist, p95_omega, p99_omega, nan_inf_count);
 
     c_close(env);
     m4d_deploy_close(&policy);
@@ -747,6 +871,8 @@ int main(int argc, char** argv) {
     free(snap_action_cap);
     free(dist_samples.data);
     free(omega_samples.data);
+    free(action_delta_samples.data);
+    free(reset_jump_samples.data);
     free(env);
     return 0;
 }
