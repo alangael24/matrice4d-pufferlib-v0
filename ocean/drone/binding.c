@@ -57,6 +57,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->dr_linear_drag_max = dict_get_default(kwargs, "dr_linear_drag_max", 1.0f);
     env->dr_angular_damping_min = dict_get_default(kwargs, "dr_angular_damping_min", 1.0f);
     env->dr_angular_damping_max = dict_get_default(kwargs, "dr_angular_damping_max", 1.0f);
+    env->dr_profile_mix = dict_get_default(kwargs, "dr_profile_mix", 0.0f);
     env->action_scale = dict_get(kwargs, "action_scale")->value;
     env->action_mode = (int)dict_get_default(kwargs, "action_mode", (float)M4D_ACTION_HOVER_TRIM);
     env->normalized_thrust_min = dict_get_default(kwargs, "normalized_thrust_min", 0.0f);

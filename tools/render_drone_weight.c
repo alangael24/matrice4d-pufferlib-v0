@@ -122,6 +122,135 @@ static void configure_dr_hard(DroneEnv* env) {
     env->sensor_noise = 0.02f;
 }
 
+static void configure_dr_family_v05(DroneEnv* env) {
+    configure_common(env);
+
+    env->domain_randomization = 1.0f;
+    env->dr_authority_gated = 1.0f;
+    env->dr_usable_t2w_min = 2.2f;
+    env->dr_usable_t2w_max = 3.8f;
+    env->dr_mass_min = 0.85f;
+    env->dr_mass_max = 1.15f;
+    env->dr_inertia_min = 0.70f;
+    env->dr_inertia_max = 1.40f;
+    env->dr_motor_thrust_min = 0.90f;
+    env->dr_motor_thrust_max = 1.10f;
+    env->dr_motor_tau_min = 0.08f;
+    env->dr_motor_tau_max = 0.20f;
+    env->dr_yaw_torque_min = 0.80f;
+    env->dr_yaw_torque_max = 1.25f;
+    env->dr_com_xy = 0.015f;
+    env->dr_com_z = 0.010f;
+    env->dr_linear_drag_min = 0.50f;
+    env->dr_linear_drag_max = 1.50f;
+    env->dr_angular_damping_min = 0.50f;
+    env->dr_angular_damping_max = 1.50f;
+
+    env->alpha_omega_z_mult = 5.0f;
+    env->action_scale = 1.0f;
+    env->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    env->normalized_thrust_min = 0.0f;
+    env->normalized_thrust_max = 0.85f;
+    env->reset_yaw_range = 3.14159f;
+    env->reset_vel_max = 0.2f;
+    env->action_latency = 0.0f;
+    env->sensor_noise = 0.0f;
+}
+
+static void configure_dr_family_v1a(DroneEnv* env) {
+    configure_common(env);
+
+    env->domain_randomization = 1.0f;
+    env->dr_authority_gated = 1.0f;
+    env->dr_usable_t2w_min = 2.0f;
+    env->dr_usable_t2w_max = 4.2f;
+    env->dr_mass_min = 0.80f;
+    env->dr_mass_max = 1.25f;
+    env->dr_inertia_min = 0.60f;
+    env->dr_inertia_max = 1.60f;
+    env->dr_motor_thrust_min = 0.85f;
+    env->dr_motor_thrust_max = 1.15f;
+    env->dr_motor_tau_min = 0.06f;
+    env->dr_motor_tau_max = 0.24f;
+    env->dr_yaw_torque_min = 0.75f;
+    env->dr_yaw_torque_max = 1.30f;
+    env->dr_com_xy = 0.025f;
+    env->dr_com_z = 0.015f;
+    env->dr_linear_drag_min = 0.25f;
+    env->dr_linear_drag_max = 2.00f;
+    env->dr_angular_damping_min = 0.50f;
+    env->dr_angular_damping_max = 2.00f;
+
+    env->alpha_omega_z_mult = 5.0f;
+    env->action_scale = 1.0f;
+    env->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    env->normalized_thrust_min = 0.0f;
+    env->normalized_thrust_max = 0.85f;
+    env->reset_yaw_range = 3.14159f;
+    env->reset_vel_max = 0.2f;
+    env->action_latency = 0.0f;
+    env->sensor_noise = 0.0f;
+}
+
+static void configure_dr_family_v1a_super_large(DroneEnv* env) {
+    configure_dr_family_v1a(env);
+
+    env->num_agents = 8;
+    env->dr_usable_t2w_min = 2.6f;
+    env->dr_usable_t2w_max = 3.4f;
+    env->dr_mass_min = 1.18f;
+    env->dr_mass_max = 1.25f;
+    env->dr_inertia_min = 1.35f;
+    env->dr_inertia_max = 1.60f;
+    env->dr_motor_thrust_min = 0.92f;
+    env->dr_motor_thrust_max = 1.08f;
+    env->dr_motor_tau_min = 0.14f;
+    env->dr_motor_tau_max = 0.22f;
+    env->dr_com_xy = 0.015f;
+    env->dr_com_z = 0.010f;
+    env->reset_pos_scale = 0.25f;
+}
+
+static void configure_dr_family_v1a_ultra_large(DroneEnv* env) {
+    configure_dr_family_v1a(env);
+
+    env->num_agents = 8;
+    env->dr_usable_t2w_min = 3.0f;
+    env->dr_usable_t2w_max = 4.0f;
+    env->dr_mass_min = 1.45f;
+    env->dr_mass_max = 1.80f;
+    env->dr_inertia_min = 2.00f;
+    env->dr_inertia_max = 3.20f;
+    env->dr_motor_thrust_min = 0.95f;
+    env->dr_motor_thrust_max = 1.05f;
+    env->dr_motor_tau_min = 0.16f;
+    env->dr_motor_tau_max = 0.24f;
+    env->dr_com_xy = 0.012f;
+    env->dr_com_z = 0.008f;
+    env->reset_pos_scale = 0.20f;
+    env->reset_vel_max = 0.1f;
+}
+
+static void configure_dr_family_v1a_ultra_large_low_authority(DroneEnv* env) {
+    configure_dr_family_v1a(env);
+
+    env->num_agents = 8;
+    env->dr_usable_t2w_min = 1.55f;
+    env->dr_usable_t2w_max = 1.95f;
+    env->dr_mass_min = 1.45f;
+    env->dr_mass_max = 1.80f;
+    env->dr_inertia_min = 2.00f;
+    env->dr_inertia_max = 3.20f;
+    env->dr_motor_thrust_min = 0.85f;
+    env->dr_motor_thrust_max = 0.98f;
+    env->dr_motor_tau_min = 0.20f;
+    env->dr_motor_tau_max = 0.28f;
+    env->dr_com_xy = 0.018f;
+    env->dr_com_z = 0.010f;
+    env->reset_pos_scale = 0.20f;
+    env->reset_vel_max = 0.1f;
+}
+
 static void configure_env(DroneEnv* env, const char* config) {
     if (strcmp(config, "baseline") == 0) {
         configure_baseline(env);
@@ -131,8 +260,25 @@ static void configure_env(DroneEnv* env, const char* config) {
         configure_dr_medium(env);
     } else if (strcmp(config, "hard") == 0) {
         configure_dr_hard(env);
+    } else if (strcmp(config, "family_v05") == 0 ||
+               strcmp(config, "family_v0.5_authority_gated") == 0) {
+        configure_dr_family_v05(env);
+    } else if (strcmp(config, "family_v1a") == 0 ||
+               strcmp(config, "family_v1a_authority_gated") == 0) {
+        configure_dr_family_v1a(env);
+    } else if (strcmp(config, "family_v1a_super_large") == 0) {
+        configure_dr_family_v1a_super_large(env);
+    } else if (strcmp(config, "family_v1a_ultra_large") == 0) {
+        configure_dr_family_v1a_ultra_large(env);
+    } else if (strcmp(config, "family_v1a_ultra_large_low_authority") == 0) {
+        configure_dr_family_v1a_ultra_large_low_authority(env);
     } else {
-        fprintf(stderr, "Unknown config '%s'; valid: baseline, light, medium, hard\n", config);
+        fprintf(stderr,
+                "Unknown config '%s'; valid: baseline, light, medium, hard, family_v05, "
+                "family_v0.5_authority_gated, family_v1a, family_v1a_authority_gated, "
+                "family_v1a_super_large, family_v1a_ultra_large, "
+                "family_v1a_ultra_large_low_authority\n",
+                config);
         exit(2);
     }
 }

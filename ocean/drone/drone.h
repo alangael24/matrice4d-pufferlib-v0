@@ -77,6 +77,7 @@ struct DroneEnv {
     float dr_linear_drag_max;
     float dr_angular_damping_min;
     float dr_angular_damping_max;
+    float dr_profile_mix;
     float action_scale;
     int action_mode;
     float normalized_thrust_min;
@@ -309,6 +310,7 @@ static inline DomainRandomization env_domain_randomization(DroneEnv* env) {
         .linear_drag_max = env->dr_linear_drag_max,
         .angular_damping_min = env->dr_angular_damping_min,
         .angular_damping_max = env->dr_angular_damping_max,
+        .profile_mix = env->dr_profile_mix,
     };
 }
 

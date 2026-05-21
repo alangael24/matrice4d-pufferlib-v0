@@ -227,6 +227,7 @@ struct DroneCudaCtx {
     float dr_yaw_torque_min, dr_yaw_torque_max;
     float dr_linear_drag_min, dr_linear_drag_max;
     float dr_angular_damping_min, dr_angular_damping_max;
+    float dr_profile_mix;
     float action_scale;
     int action_mode;
     float normalized_thrust_min, normalized_thrust_max;
@@ -468,26 +469,90 @@ __device__ __forceinline__ float normalized_thrust_command_dev(const DroneCudaPa
 __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
                                 curandStatePhilox4_32_10_t* rng) {
     bool authority_gated = dr_authority_gated_dev(cfg);
+    float usable_t2w_min = cfg.dr_usable_t2w_min;
+    float usable_t2w_max = cfg.dr_usable_t2w_max;
+    float mass_min = cfg.dr_mass_min;
+    float mass_max = cfg.dr_mass_max;
+    float inertia_min = cfg.dr_inertia_min;
+    float inertia_max = cfg.dr_inertia_max;
+    float motor_thrust_min = cfg.dr_motor_thrust_min;
+    float motor_thrust_max = cfg.dr_motor_thrust_max;
+    float motor_tau_min = cfg.dr_motor_tau_min;
+    float motor_tau_max = cfg.dr_motor_tau_max;
+    float yaw_torque_min = cfg.dr_yaw_torque_min;
+    float yaw_torque_max = cfg.dr_yaw_torque_max;
+    float linear_drag_min = cfg.dr_linear_drag_min;
+    float linear_drag_max = cfg.dr_linear_drag_max;
+    float angular_damping_min = cfg.dr_angular_damping_min;
+    float angular_damping_max = cfg.dr_angular_damping_max;
+    float com_xy_range = cfg.domain_randomization > 0.0f ? fabsf(cfg.dr_com_xy) : 0.0f;
+    float com_z_range = cfg.domain_randomization > 0.0f ? fabsf(cfg.dr_com_z) : 0.0f;
+
+    if (authority_gated && cfg.dr_profile_mix > 0.0f) {
+        float profile = rndf_dev(0.0f, 1.0f, rng);
+        if (profile < 0.35f) {
+            usable_t2w_min = 2.2f; usable_t2w_max = 3.8f;
+            mass_min = 0.85f; mass_max = 1.15f;
+            inertia_min = 0.70f; inertia_max = 1.40f;
+            motor_thrust_min = 0.90f; motor_thrust_max = 1.10f;
+            motor_tau_min = 0.08f; motor_tau_max = 0.20f;
+            yaw_torque_min = 0.80f; yaw_torque_max = 1.25f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+            angular_damping_min = 0.50f; angular_damping_max = 1.50f;
+            com_xy_range = 0.015f; com_z_range = 0.010f;
+        } else if (profile < 0.70f) {
+            usable_t2w_min = 2.0f; usable_t2w_max = 4.2f;
+            mass_min = 0.80f; mass_max = 1.25f;
+            inertia_min = 0.60f; inertia_max = 1.60f;
+            motor_thrust_min = 0.85f; motor_thrust_max = 1.15f;
+            motor_tau_min = 0.06f; motor_tau_max = 0.24f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.30f;
+            linear_drag_min = 0.25f; linear_drag_max = 2.00f;
+            angular_damping_min = 0.50f; angular_damping_max = 2.00f;
+            com_xy_range = 0.025f; com_z_range = 0.015f;
+        } else if (profile < 0.90f) {
+            usable_t2w_min = 1.8f; usable_t2w_max = 2.4f;
+            mass_min = 1.15f; mass_max = 1.50f;
+            inertia_min = 1.40f; inertia_max = 2.20f;
+            motor_thrust_min = 0.88f; motor_thrust_max = 1.05f;
+            motor_tau_min = 0.16f; motor_tau_max = 0.26f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.25f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+            angular_damping_min = 0.75f; angular_damping_max = 2.00f;
+            com_xy_range = 0.018f; com_z_range = 0.010f;
+        } else {
+            usable_t2w_min = 1.55f; usable_t2w_max = 1.95f;
+            mass_min = 1.45f; mass_max = 1.80f;
+            inertia_min = 2.00f; inertia_max = 3.20f;
+            motor_thrust_min = 0.85f; motor_thrust_max = 0.98f;
+            motor_tau_min = 0.20f; motor_tau_max = 0.28f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.25f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+            angular_damping_min = 0.75f; angular_damping_max = 2.00f;
+            com_xy_range = 0.018f; com_z_range = 0.010f;
+        }
+    }
+
     float mass_mult = authority_gated
-        ? dr_sample_range_dev(rng, cfg.dr_mass_min, cfg.dr_mass_max, 1.0f)
+        ? dr_sample_range_dev(rng, mass_min, mass_max, 1.0f)
         : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_mass));
     float ixx_mult = authority_gated
-        ? dr_sample_range_dev(rng, cfg.dr_inertia_min, cfg.dr_inertia_max, 1.0f)
+        ? dr_sample_range_dev(rng, inertia_min, inertia_max, 1.0f)
         : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
     float iyy_mult = authority_gated
-        ? dr_sample_range_dev(rng, cfg.dr_inertia_min, cfg.dr_inertia_max, 1.0f)
+        ? dr_sample_range_dev(rng, inertia_min, inertia_max, 1.0f)
         : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
     float izz_mult = authority_gated
-        ? dr_sample_range_dev(rng, cfg.dr_inertia_min, cfg.dr_inertia_max, 1.0f)
+        ? dr_sample_range_dev(rng, inertia_min, inertia_max, 1.0f)
         : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
     float k_thrust_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_k_thrust));
     float linear_drag_mult = authority_gated
-        ? dr_sample_range_dev(rng, cfg.dr_linear_drag_min, cfg.dr_linear_drag_max, 1.0f)
+        ? dr_sample_range_dev(rng, linear_drag_min, linear_drag_max, 1.0f)
         : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_linear_drag));
     float yaw_drag_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_yaw_drag));
     float motor_lag_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_motor_lag));
     float angular_damping_mult = authority_gated
-        ? dr_sample_range_dev(rng, cfg.dr_angular_damping_min, cfg.dr_angular_damping_max, 1.0f)
+        ? dr_sample_range_dev(rng, angular_damping_min, angular_damping_max, 1.0f)
         : 1.0f;
     float motor_thrust_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     float motor_tau[4] = {
@@ -500,16 +565,16 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
         #pragma unroll
         for (int i = 0; i < 4; i++) {
             motor_thrust_scale[i] = dr_sample_range_dev(
-                rng, cfg.dr_motor_thrust_min, cfg.dr_motor_thrust_max, 1.0f);
+                rng, motor_thrust_min, motor_thrust_max, 1.0f);
             motor_tau[i] = dr_sample_range_dev(
-                rng, cfg.dr_motor_tau_min, cfg.dr_motor_tau_max, BASE_K_MOT);
+                rng, motor_tau_min, motor_tau_max, BASE_K_MOT);
             yaw_torque_scale[i] = dr_sample_range_dev(
-                rng, cfg.dr_yaw_torque_min, cfg.dr_yaw_torque_max, 1.0f);
+                rng, yaw_torque_min, yaw_torque_max, 1.0f);
             sum_motor_scale += motor_thrust_scale[i];
         }
         float cap = clampf_dev(cfg.normalized_thrust_max, 1e-3f, 1.0f);
         float usable_t2w = dr_sample_range_dev(
-            rng, cfg.dr_usable_t2w_min, cfg.dr_usable_t2w_max, 2.5f);
+            rng, usable_t2w_min, usable_t2w_max, 2.5f);
         float base_motor_max = BASE_K_THRUST * BASE_MAX_RPM * BASE_MAX_RPM;
         k_thrust_mult = usable_t2w * (BASE_MASS * mass_mult * BASE_GRAVITY)
             / fmaxf(cap * base_motor_max * sum_motor_scale, 1e-6f);
@@ -520,10 +585,8 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
         motor_lag_mult *= 0.25f;
     }
 
-    float com_xy = cfg.domain_randomization > 0.0f ? fabsf(cfg.dr_com_xy) : 0.0f;
-    float com_z_range = cfg.domain_randomization > 0.0f ? fabsf(cfg.dr_com_z) : 0.0f;
-    float com_x = rndf_dev(-com_xy, com_xy, rng);
-    float com_y = rndf_dev(-com_xy, com_xy, rng);
+    float com_x = rndf_dev(-com_xy_range, com_xy_range, rng);
+    float com_y = rndf_dev(-com_xy_range, com_xy_range, rng);
     float com_z = rndf_dev(-com_z_range, com_z_range, rng);
 
     p->mass = BASE_MASS * mass_mult;
@@ -1106,6 +1169,7 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.dr_linear_drag_max = dict_float(env_kwargs, "dr_linear_drag_max", 1.0f);
     ctx.dr_angular_damping_min = dict_float(env_kwargs, "dr_angular_damping_min", 1.0f);
     ctx.dr_angular_damping_max = dict_float(env_kwargs, "dr_angular_damping_max", 1.0f);
+    ctx.dr_profile_mix = dict_float(env_kwargs, "dr_profile_mix", 0.0f);
     ctx.action_scale = dict_float(env_kwargs, "action_scale", 1.0f);
     ctx.action_mode = (int)dict_float(env_kwargs, "action_mode", (float)M4D_ACTION_HOVER_TRIM);
     ctx.normalized_thrust_min = dict_float(env_kwargs, "normalized_thrust_min", 0.0f);

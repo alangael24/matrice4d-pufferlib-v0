@@ -228,6 +228,7 @@ typedef struct {
     float linear_drag_max;
     float angular_damping_min;
     float angular_damping_max;
+    float profile_mix;
 } DomainRandomization;
 
 typedef struct {
@@ -319,6 +320,10 @@ static inline float dr_sample_mult(unsigned int* rng, float range) {
 
 static inline bool dr_authority_gated(const DomainRandomization* dr) {
     return dr != NULL && dr->enabled > 0.0f && dr->authority_gated > 0.0f;
+}
+
+static inline bool dr_v1a2_low_authority_mix(const DomainRandomization* dr) {
+    return dr_authority_gated(dr) && dr->profile_mix > 0.0f;
 }
 
 static inline float dr_sample_range(unsigned int* rng, float lo, float hi, float fallback) {
@@ -526,26 +531,90 @@ static inline float action_to_target_thrust(const Params* p, float raw_action, f
 
 static inline void init_drone(Drone* drone, unsigned int* rng, const DomainRandomization* dr) {
     bool authority_gated = dr_authority_gated(dr);
+    float usable_t2w_min = dr != NULL ? dr->usable_t2w_min : 0.0f;
+    float usable_t2w_max = dr != NULL ? dr->usable_t2w_max : 0.0f;
+    float mass_min = dr != NULL ? dr->mass_min : 1.0f;
+    float mass_max = dr != NULL ? dr->mass_max : 1.0f;
+    float inertia_min = dr != NULL ? dr->inertia_min : 1.0f;
+    float inertia_max = dr != NULL ? dr->inertia_max : 1.0f;
+    float motor_thrust_min = dr != NULL ? dr->motor_thrust_min : 1.0f;
+    float motor_thrust_max = dr != NULL ? dr->motor_thrust_max : 1.0f;
+    float motor_tau_min = dr != NULL ? dr->motor_tau_min : BASE_K_MOT;
+    float motor_tau_max = dr != NULL ? dr->motor_tau_max : BASE_K_MOT;
+    float yaw_torque_min = dr != NULL ? dr->yaw_torque_min : 1.0f;
+    float yaw_torque_max = dr != NULL ? dr->yaw_torque_max : 1.0f;
+    float linear_drag_min = dr != NULL ? dr->linear_drag_min : 1.0f;
+    float linear_drag_max = dr != NULL ? dr->linear_drag_max : 1.0f;
+    float angular_damping_min = dr != NULL ? dr->angular_damping_min : 1.0f;
+    float angular_damping_max = dr != NULL ? dr->angular_damping_max : 1.0f;
+    float com_xy_range = (dr != NULL && dr->enabled > 0.0f) ? fabsf(dr->com_xy) : 0.0f;
+    float com_z_range = (dr != NULL && dr->enabled > 0.0f) ? fabsf(dr->com_z) : 0.0f;
+
+    if (dr_v1a2_low_authority_mix(dr)) {
+        float profile = rndf(0.0f, 1.0f, rng);
+        if (profile < 0.35f) {
+            usable_t2w_min = 2.2f; usable_t2w_max = 3.8f;
+            mass_min = 0.85f; mass_max = 1.15f;
+            inertia_min = 0.70f; inertia_max = 1.40f;
+            motor_thrust_min = 0.90f; motor_thrust_max = 1.10f;
+            motor_tau_min = 0.08f; motor_tau_max = 0.20f;
+            yaw_torque_min = 0.80f; yaw_torque_max = 1.25f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+            angular_damping_min = 0.50f; angular_damping_max = 1.50f;
+            com_xy_range = 0.015f; com_z_range = 0.010f;
+        } else if (profile < 0.70f) {
+            usable_t2w_min = 2.0f; usable_t2w_max = 4.2f;
+            mass_min = 0.80f; mass_max = 1.25f;
+            inertia_min = 0.60f; inertia_max = 1.60f;
+            motor_thrust_min = 0.85f; motor_thrust_max = 1.15f;
+            motor_tau_min = 0.06f; motor_tau_max = 0.24f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.30f;
+            linear_drag_min = 0.25f; linear_drag_max = 2.00f;
+            angular_damping_min = 0.50f; angular_damping_max = 2.00f;
+            com_xy_range = 0.025f; com_z_range = 0.015f;
+        } else if (profile < 0.90f) {
+            usable_t2w_min = 1.8f; usable_t2w_max = 2.4f;
+            mass_min = 1.15f; mass_max = 1.50f;
+            inertia_min = 1.40f; inertia_max = 2.20f;
+            motor_thrust_min = 0.88f; motor_thrust_max = 1.05f;
+            motor_tau_min = 0.16f; motor_tau_max = 0.26f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.25f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+            angular_damping_min = 0.75f; angular_damping_max = 2.00f;
+            com_xy_range = 0.018f; com_z_range = 0.010f;
+        } else {
+            usable_t2w_min = 1.55f; usable_t2w_max = 1.95f;
+            mass_min = 1.45f; mass_max = 1.80f;
+            inertia_min = 2.00f; inertia_max = 3.20f;
+            motor_thrust_min = 0.85f; motor_thrust_max = 0.98f;
+            motor_tau_min = 0.20f; motor_tau_max = 0.28f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.25f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+            angular_damping_min = 0.75f; angular_damping_max = 2.00f;
+            com_xy_range = 0.018f; com_z_range = 0.010f;
+        }
+    }
+
     float mass_mult = authority_gated
-        ? dr_sample_range(rng, dr->mass_min, dr->mass_max, 1.0f)
+        ? dr_sample_range(rng, mass_min, mass_max, 1.0f)
         : dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->mass));
     float ixx_mult = authority_gated
-        ? dr_sample_range(rng, dr->inertia_min, dr->inertia_max, 1.0f)
+        ? dr_sample_range(rng, inertia_min, inertia_max, 1.0f)
         : dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->inertia));
     float iyy_mult = authority_gated
-        ? dr_sample_range(rng, dr->inertia_min, dr->inertia_max, 1.0f)
+        ? dr_sample_range(rng, inertia_min, inertia_max, 1.0f)
         : dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->inertia));
     float izz_mult = authority_gated
-        ? dr_sample_range(rng, dr->inertia_min, dr->inertia_max, 1.0f)
+        ? dr_sample_range(rng, inertia_min, inertia_max, 1.0f)
         : dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->inertia));
     float k_thrust_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->k_thrust));
     float linear_drag_mult = authority_gated
-        ? dr_sample_range(rng, dr->linear_drag_min, dr->linear_drag_max, 1.0f)
+        ? dr_sample_range(rng, linear_drag_min, linear_drag_max, 1.0f)
         : dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->linear_drag));
     float yaw_drag_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->yaw_drag));
     float motor_lag_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->motor_lag));
     float angular_damping_mult = authority_gated
-        ? dr_sample_range(rng, dr->angular_damping_min, dr->angular_damping_max, 1.0f)
+        ? dr_sample_range(rng, angular_damping_min, angular_damping_max, 1.0f)
         : 1.0f;
     float motor_thrust_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     float motor_tau[4];
@@ -557,14 +626,14 @@ static inline void init_drone(Drone* drone, unsigned int* rng, const DomainRando
         float sum_motor_scale = 0.0f;
         for (int i = 0; i < 4; i++) {
             motor_thrust_scale[i] =
-                dr_sample_range(rng, dr->motor_thrust_min, dr->motor_thrust_max, 1.0f);
-            motor_tau[i] = dr_sample_range(rng, dr->motor_tau_min, dr->motor_tau_max, BASE_K_MOT);
+                dr_sample_range(rng, motor_thrust_min, motor_thrust_max, 1.0f);
+            motor_tau[i] = dr_sample_range(rng, motor_tau_min, motor_tau_max, BASE_K_MOT);
             yaw_torque_scale[i] =
-                dr_sample_range(rng, dr->yaw_torque_min, dr->yaw_torque_max, 1.0f);
+                dr_sample_range(rng, yaw_torque_min, yaw_torque_max, 1.0f);
             sum_motor_scale += motor_thrust_scale[i];
         }
         float cap = clampf(dr->normalized_thrust_max, 1e-3f, 1.0f);
-        float usable_t2w = dr_sample_range(rng, dr->usable_t2w_min, dr->usable_t2w_max, 2.5f);
+        float usable_t2w = dr_sample_range(rng, usable_t2w_min, usable_t2w_max, 2.5f);
         float base_motor_max = BASE_K_THRUST * BASE_MAX_RPM * BASE_MAX_RPM;
         k_thrust_mult = usable_t2w * (BASE_MASS * mass_mult * BASE_GRAVITY)
             / fmaxf(cap * base_motor_max * sum_motor_scale, 1e-6f);
@@ -574,10 +643,8 @@ static inline void init_drone(Drone* drone, unsigned int* rng, const DomainRando
         motor_lag_mult *= 0.25f;
     }
 
-    float com_xy = (dr != NULL && dr->enabled > 0.0f) ? fabsf(dr->com_xy) : 0.0f;
-    float com_z_range = (dr != NULL && dr->enabled > 0.0f) ? fabsf(dr->com_z) : 0.0f;
-    float com_x = rndf(-com_xy, com_xy, rng);
-    float com_y = rndf(-com_xy, com_xy, rng);
+    float com_x = rndf(-com_xy_range, com_xy_range, rng);
+    float com_y = rndf(-com_xy_range, com_xy_range, rng);
     float com_z = rndf(-com_z_range, com_z_range, rng);
 
     drone->params.arm_len = BASE_ARM_LEN;

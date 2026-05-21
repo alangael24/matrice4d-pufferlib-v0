@@ -114,14 +114,32 @@ static void update_camera_position(Client* c, Vec3 target_pos) {
 
 void handle_camera_controls(Client* client, Vec3 target_pos, float min_zoom) {
     Vector2 mouse_pos = GetMousePosition();
+    static Vector2 click_start = {0.0f, 0.0f};
+    static bool left_pressed = false;
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         client->is_dragging = true;
+        left_pressed = true;
+        click_start = mouse_pos;
         client->last_mouse_pos = mouse_pos;
     }
 
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        float dx = mouse_pos.x - click_start.x;
+        float dy = mouse_pos.y - click_start.y;
+        if (left_pressed && sqrtf(dx * dx + dy * dy) < 6.0f) {
+            client->camera_distance -= 3.0f;
+            client->camera_distance = clampf(client->camera_distance, min_zoom, 100.0f);
+            update_camera_position(client, target_pos);
+        }
         client->is_dragging = false;
+        left_pressed = false;
+    }
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        client->camera_distance += 3.0f;
+        client->camera_distance = clampf(client->camera_distance, min_zoom, 100.0f);
+        update_camera_position(client, target_pos);
     }
 
     if (client->is_dragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
@@ -138,13 +156,6 @@ void handle_camera_controls(Client* client, Vec3 target_pos, float min_zoom) {
 
         client->last_mouse_pos = mouse_pos;
 
-        update_camera_position(client, target_pos);
-    }
-
-    float wheel = GetMouseWheelMove();
-    if (wheel != 0) {
-        client->camera_distance -= wheel * 2.0f;
-        client->camera_distance = clampf(client->camera_distance, min_zoom, 100.0f);
         update_camera_position(client, target_pos);
     }
 
@@ -352,6 +363,16 @@ static inline void maybe_save_render_frame(void) {
     frame++;
 }
 
+static inline float drone_visual_mass_scale(const Drone* agent) {
+    if (env_int("PUFFER_DRONE_VISUAL_MASS_SCALE", 0) == 0) {
+        return 1.0f;
+    }
+
+    float factor = env_float("PUFFER_DRONE_VISUAL_MASS_FACTOR", 1.35f);
+    float scale = 1.0f + (agent->params.mass_mult - 1.0f) * factor;
+    return clampf(scale, 0.65f, 1.45f);
+}
+
 void DrawRing3D(Target ring, float thickness, Color entryColor, Color exitColor) {
     float half_thick = thickness / 2.0f;
 
@@ -385,8 +406,8 @@ void DrawDroneModel(Client* client, Drone* agent, int drone_idx, float dt, Color
         if (angles[p] < 0.0f) angles[p] += 2.0f * PI;
     }
 
-    // Build world transform matrices using client's model_scale
-    float scale = client->model_scale;
+    // Optional visual-only mass scaling makes DR size variation inspectable.
+    float scale = client->model_scale * drone_visual_mass_scale(agent);
     Matrix mScale = MatrixScale(scale, scale, scale);
     Matrix mRot = quat_to_matrix(agent->state.quat);
     Matrix mTrans = MatrixTranslate(agent->state.pos.x, agent->state.pos.y, agent->state.pos.z);
@@ -428,7 +449,7 @@ void DrawDroneModel(Client* client, Drone* agent, int drone_idx, float dt, Color
 }
 
 void DrawDronePrimitive(Client* client, Drone* agent, float* actions, Color body_color) {
-    const float scale = client->model_scale;
+    const float scale = client->model_scale * drone_visual_mass_scale(agent);
 
     DrawSphere((Vector3){agent->state.pos.x, agent->state.pos.y, agent->state.pos.z}, 0.06f * scale,
                body_color);
@@ -578,7 +599,7 @@ void c_render(DroneEnv* env) {
 
         if (client->render_mode == 2) {
             // Minimal mode: draw small sphere matching hover_dist size
-            float sphere_size = env->hover_dist;
+            float sphere_size = env->hover_dist * drone_visual_mass_scale(agent);
             // Use a distinct color (yellow/orange) to differentiate from target
             Color drone_sphere_color = (inspect_mode && is_selected) ? (Color){255, 200, 0, 255}
                                                                      : (Color){255, 165, 0, 200};
@@ -688,6 +709,17 @@ void c_render(DroneEnv* env) {
         DrawText(TextFormat("Drone: %d / %d (A/D to switch)", idx, env->num_agents - 1), 10, y, 20,
                  PUFF_GREEN);
         y += 30;
+        float usable_t2w = agent->params.normalized_thrust_max
+            * total_max_motor_thrust(&agent->params)
+            / fmaxf(agent->params.mass * agent->params.gravity, 1e-6f);
+        float tau_max = agent->params.motor_tau[0];
+        for (int m = 1; m < 4; m++) {
+            if (agent->params.motor_tau[m] > tau_max) tau_max = agent->params.motor_tau[m];
+        }
+        DrawText(TextFormat("Mass: %.2fx  usable T/W: %.2f  tau_max: %.2fs",
+                            agent->params.mass_mult, usable_t2w, tau_max),
+                 10, y, 18, WHITE);
+        y += 20;
         DrawText(TextFormat("Pos: (%.1f, %.1f, %.1f)", agent->state.pos.x, agent->state.pos.y,
                             agent->state.pos.z),
                  10, y, 18, WHITE);
@@ -737,9 +769,9 @@ void c_render(DroneEnv* env) {
     }
 
     // Controls (always visible)
-    DrawText("Left click + drag: Rotate camera", 10, y, 16, LIGHTGRAY);
+    DrawText("Left click: Zoom in / drag: Rotate camera", 10, y, 16, LIGHTGRAY);
     y += 18;
-    DrawText("Mouse wheel: Zoom in/out", 10, y, 16, LIGHTGRAY);
+    DrawText("Right click: Zoom out", 10, y, 16, LIGHTGRAY);
     y += 18;
     DrawText("Space: Change task", 10, y, 16, LIGHTGRAY);
     y += 18;
