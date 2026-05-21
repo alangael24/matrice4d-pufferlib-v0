@@ -5,6 +5,41 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct {
+    float* data;
+    size_t len;
+    size_t cap;
+} FloatVec;
+
+static void float_vec_push(FloatVec* vec, float value) {
+    if (vec->len == vec->cap) {
+        size_t next = vec->cap == 0 ? 1024 : vec->cap * 2;
+        float* data = (float*)realloc(vec->data, next * sizeof(float));
+        if (data == NULL) {
+            fprintf(stderr, "Failed to grow metric sample buffer to %zu floats\n", next);
+            exit(1);
+        }
+        vec->data = data;
+        vec->cap = next;
+    }
+    vec->data[vec->len++] = value;
+}
+
+static int cmp_float(const void* a, const void* b) {
+    float fa = *(const float*)a;
+    float fb = *(const float*)b;
+    return (fa > fb) - (fa < fb);
+}
+
+static float percentile(FloatVec* vec, float q) {
+    if (vec->len == 0) return 0.0f;
+    qsort(vec->data, vec->len, sizeof(float), cmp_float);
+    float idx_f = q * (float)(vec->len - 1);
+    size_t idx = (size_t)(idx_f + 0.5f);
+    if (idx >= vec->len) idx = vec->len - 1;
+    return vec->data[idx];
+}
+
 void c_close_client(Client* client) {
     (void)client;
 }
@@ -58,6 +93,23 @@ static void configure_common(DroneEnv* env, int num_agents) {
     env->reset_vel_max = 0.2f;
     env->action_latency = 0.0f;
     env->sensor_noise = 0.0f;
+    env->dr_authority_gated = 0.0f;
+    env->dr_usable_t2w_min = 0.0f;
+    env->dr_usable_t2w_max = 0.0f;
+    env->dr_mass_min = 1.0f;
+    env->dr_mass_max = 1.0f;
+    env->dr_inertia_min = 1.0f;
+    env->dr_inertia_max = 1.0f;
+    env->dr_motor_thrust_min = 1.0f;
+    env->dr_motor_thrust_max = 1.0f;
+    env->dr_motor_tau_min = BASE_K_MOT;
+    env->dr_motor_tau_max = BASE_K_MOT;
+    env->dr_yaw_torque_min = 1.0f;
+    env->dr_yaw_torque_max = 1.0f;
+    env->dr_linear_drag_min = 1.0f;
+    env->dr_linear_drag_max = 1.0f;
+    env->dr_angular_damping_min = 1.0f;
+    env->dr_angular_damping_max = 1.0f;
 }
 
 static void configure_baseline(DroneEnv* env, int num_agents) {
@@ -86,6 +138,28 @@ static void configure_dr_light(DroneEnv* env, int num_agents) {
     env->dr_motor_lag = 0.05f;
     env->dr_com_xy = 0.01f;
     env->dr_com_z = 0.0f;
+}
+
+static void configure_dr_narrow20(DroneEnv* env, int num_agents) {
+    configure_common(env, num_agents);
+
+    env->domain_randomization = 1.0f;
+    env->dr_mass = 0.20f;
+    env->dr_inertia = 0.20f;
+    env->dr_k_thrust = 0.20f;
+    env->dr_linear_drag = 0.20f;
+    env->dr_yaw_drag = 0.20f;
+    env->dr_motor_lag = 0.20f;
+    env->dr_com_xy = 0.01f;
+    env->dr_com_z = 0.01f;
+
+    env->alpha_omega_z_mult = 5.0f;
+    env->action_scale = 1.0f;
+    env->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    env->normalized_thrust_min = 0.0f;
+    env->normalized_thrust_max = 0.85f;
+    env->reset_yaw_range = 3.14159f;
+    env->reset_vel_max = 0.2f;
 }
 
 static void configure_dr_medium(DroneEnv* env, int num_agents) {
@@ -124,25 +198,103 @@ static void configure_dr_hard(DroneEnv* env, int num_agents) {
     env->sensor_noise = 0.02f;
 }
 
+static void configure_dr_family_v1(DroneEnv* env, int num_agents) {
+    configure_common(env, num_agents);
+
+    env->domain_randomization = 1.0f;
+    env->dr_mass = 0.25f;
+    env->dr_inertia = 0.50f;
+    env->dr_k_thrust = 0.35f;
+    env->dr_linear_drag = 0.75f;
+    env->dr_yaw_drag = 0.75f;
+    env->dr_motor_lag = 0.50f;
+    env->dr_com_xy = 0.025f;
+    env->dr_com_z = 0.015f;
+
+    env->alpha_omega_z_mult = 5.0f;
+    env->action_scale = 1.0f;
+    env->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    env->normalized_thrust_min = 0.0f;
+    env->normalized_thrust_max = 1.0f;
+    env->reset_yaw_range = 3.14159f;
+    env->reset_vel_max = 0.2f;
+    env->action_latency = 0.01f;
+    env->sensor_noise = 0.01f;
+}
+
+static void configure_dr_family_v05(DroneEnv* env, int num_agents) {
+    configure_common(env, num_agents);
+
+    env->domain_randomization = 1.0f;
+    env->dr_authority_gated = 1.0f;
+    env->dr_usable_t2w_min = 2.2f;
+    env->dr_usable_t2w_max = 3.8f;
+    env->dr_mass_min = 0.85f;
+    env->dr_mass_max = 1.15f;
+    env->dr_inertia_min = 0.70f;
+    env->dr_inertia_max = 1.40f;
+    env->dr_motor_thrust_min = 0.90f;
+    env->dr_motor_thrust_max = 1.10f;
+    env->dr_motor_tau_min = 0.08f;
+    env->dr_motor_tau_max = 0.20f;
+    env->dr_yaw_torque_min = 0.80f;
+    env->dr_yaw_torque_max = 1.25f;
+    env->dr_com_xy = 0.015f;
+    env->dr_com_z = 0.010f;
+    env->dr_linear_drag_min = 0.50f;
+    env->dr_linear_drag_max = 1.50f;
+    env->dr_angular_damping_min = 0.50f;
+    env->dr_angular_damping_max = 1.50f;
+
+    env->alpha_omega_z_mult = 5.0f;
+    env->action_scale = 1.0f;
+    env->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    env->normalized_thrust_min = 0.0f;
+    env->normalized_thrust_max = 0.85f;
+    env->reset_yaw_range = 3.14159f;
+    env->reset_vel_max = 0.2f;
+    env->action_latency = 0.0f;
+    env->sensor_noise = 0.0f;
+}
+
 static void configure_env(DroneEnv* env, const char* config, int num_agents) {
     if (strcmp(config, "baseline") == 0) {
         configure_baseline(env, num_agents);
     } else if (strcmp(config, "light") == 0) {
         configure_dr_light(env, num_agents);
+    } else if (strcmp(config, "narrow20") == 0) {
+        configure_dr_narrow20(env, num_agents);
     } else if (strcmp(config, "medium") == 0) {
         configure_dr_medium(env, num_agents);
     } else if (strcmp(config, "hard") == 0) {
         configure_dr_hard(env, num_agents);
+    } else if (strcmp(config, "family_v1") == 0) {
+        configure_dr_family_v1(env, num_agents);
+    } else if (strcmp(config, "family_v05") == 0 ||
+               strcmp(config, "family_v0.5_authority_gated") == 0) {
+        configure_dr_family_v05(env, num_agents);
     } else {
-        fprintf(stderr, "Unknown config '%s'; valid: baseline, light, medium, hard\n", config);
+        fprintf(stderr,
+                "Unknown config '%s'; valid: baseline, light, narrow20, medium, hard, "
+                "family_v1, family_v05\n",
+                config);
         exit(2);
+    }
+}
+
+static void count_nonfinite_array(const float* values, size_t n, long* count) {
+    for (size_t i = 0; i < n; i++) {
+        if (!isfinite(values[i])) {
+            *count += 1;
+        }
     }
 }
 
 int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr,
-                "Usage: %s WEIGHTS.bin [episodes] [baseline|light|medium|hard] [action_scale] "
+                "Usage: %s WEIGHTS.bin [episodes] "
+                "[baseline|light|narrow20|medium|hard|family_v1|family_v05] [action_scale] "
                 "[num_agents]\n",
                 argv[0]);
         return 2;
@@ -178,18 +330,38 @@ int main(int argc, char** argv) {
     int reset_state_interval = getenv("M4D_RESET_STATE_INTERVAL")
                                    ? atoi(getenv("M4D_RESET_STATE_INTERVAL"))
                                    : M4D_DEPLOY_DEFAULT_RESET_INTERVAL;
+    env->rng = getenv("M4D_ENV_SEED") ? (unsigned int)atoi(getenv("M4D_ENV_SEED")) : 42u;
     srand(policy_seed);
     if (sample_actions) {
         fprintf(stderr,
                 "M4D_SAMPLE_ACTIONS is ignored by the deployment runtime; deterministic mean "
                 "actions are used.\n");
     }
+    const char* episode_csv_path = getenv("M4D_EPISODE_CSV");
+    FILE* episode_csv = NULL;
+    if (episode_csv_path != NULL && episode_csv_path[0] != '\0') {
+        episode_csv = fopen(episode_csv_path, "w");
+        if (episode_csv == NULL) {
+            perror("Failed to open M4D_EPISODE_CSV");
+            return 1;
+        }
+        fprintf(episode_csv,
+                "episode,agent,terminal,episode_length,episode_return,mass_scale,"
+                "i_scale_mean,i_scale_min,i_scale_max,effective_t2w,"
+                "usable_t2w_true,hover_fraction,thrust_margin,"
+                "min_motor_scale,mean_motor_scale,max_motor_scale,max_motor_tau,"
+                "motor_thrust_scale_min,motor_thrust_scale_max,motor_tau_max,"
+                "com_offset_norm,obs_delay,act_delay,battery_sag,sensor_noise,action_cap,"
+                "thrust_limit_scale,mean_abs_action,action_saturation,"
+                "mean_abs_delta_action,episode_action_saturation,"
+                "episode_mean_abs_delta_action,episode_reset_jump,max_dist,max_omega\n");
+    }
 
     printf("config=%s action_scale=%.6f action_mode=%d normalized_thrust_min=%.6f "
            "normalized_thrust_max=%.6f num_agents=%d deterministic=%d sample_actions=%d "
-           "policy_seed=%u trace_steps=%d reset_state_interval=%d\n",
+           "policy_seed=%u env_seed=%u trace_steps=%d reset_state_interval=%d\n",
            config, env->action_scale, env->action_mode, env->normalized_thrust_min,
-           env->normalized_thrust_max, env->num_agents, 1, 0, policy_seed, trace_steps,
+           env->normalized_thrust_max, env->num_agents, 1, 0, policy_seed, env->rng, trace_steps,
            reset_state_interval);
 
     const size_t obs_size = 23;
@@ -213,15 +385,157 @@ int main(int argc, char** argv) {
     int completed = 0;
     int oob_count = 0;
     int timeout_count = 0;
+    long nan_inf_count = 0;
     double sum_return = 0.0;
     double sum_sq_return = 0.0;
     double sum_len = 0.0;
+    double action_delta_sum = 0.0;
+    double reset_jump_sum = 0.0;
+    float reset_jump_max = 0.0f;
+    long action_delta_count = 0;
+    long reset_jump_count = 0;
     float min_return = 0.0f;
     float max_return = 0.0f;
+    float* prev_actions = (float*)calloc((size_t)env->num_agents * 4, sizeof(float));
+    unsigned char* has_prev_action = (unsigned char*)calloc(env->num_agents, sizeof(unsigned char));
+    float* continued_actions = (float*)calloc((size_t)env->num_agents * 4, sizeof(float));
+    float* state_backup = (float*)calloc((size_t)M4D_DEPLOY_NUM_LAYERS * env->num_agents *
+                                             M4D_DEPLOY_HIDDEN_SIZE,
+                                         sizeof(float));
+    float* ep_action_abs_sum = (float*)calloc(env->num_agents, sizeof(float));
+    float* ep_action_saturation_sum = (float*)calloc(env->num_agents, sizeof(float));
+    float* ep_action_delta_sum = (float*)calloc(env->num_agents, sizeof(float));
+    int* ep_action_delta_count = (int*)calloc(env->num_agents, sizeof(int));
+    float* ep_reset_jump_sum = (float*)calloc(env->num_agents, sizeof(float));
+    int* ep_reset_jump_count = (int*)calloc(env->num_agents, sizeof(int));
+    float* ep_max_dist = (float*)calloc(env->num_agents, sizeof(float));
+    float* ep_max_omega = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_mass_scale = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_i_scale_mean = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_i_scale_min = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_i_scale_max = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_effective_t2w = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_usable_t2w_true = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_hover_fraction = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_thrust_margin = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_min_motor_scale = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_mean_motor_scale = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_max_motor_scale = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_max_motor_tau = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_motor_tau_max = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_com_offset_norm = (float*)calloc(env->num_agents, sizeof(float));
+    float* snap_action_cap = (float*)calloc(env->num_agents, sizeof(float));
+    FloatVec dist_samples = {0};
+    FloatVec omega_samples = {0};
     int step = 0;
 
     while (completed < target_episodes) {
-        m4d_deploy_forward(&policy, env->observations, env->actions);
+        count_nonfinite_array(env->observations, (size_t)env->num_agents * obs_size,
+                              &nan_inf_count);
+        for (int i = 0; i < env->num_agents; i++) {
+            Drone* agent = &env->agents[i];
+            float dist = norm3(sub3(agent->target->pos, agent->state.pos));
+            float omega = norm3(agent->state.omega);
+            float_vec_push(&dist_samples, dist);
+            float_vec_push(&omega_samples, omega);
+            if (dist > ep_max_dist[i]) ep_max_dist[i] = dist;
+            if (omega > ep_max_omega[i]) ep_max_omega[i] = omega;
+
+            Params* p = &agent->params;
+            float i_min = fminf(p->ixx_mult, fminf(p->iyy_mult, p->izz_mult));
+            float i_max = fmaxf(p->ixx_mult, fmaxf(p->iyy_mult, p->izz_mult));
+            float max_cmd = clampf(p->normalized_thrust_max, p->normalized_thrust_min, 1.0f);
+            snap_mass_scale[i] = p->mass_mult;
+            snap_i_scale_mean[i] = (p->ixx_mult + p->iyy_mult + p->izz_mult) / 3.0f;
+            snap_i_scale_min[i] = i_min;
+            snap_i_scale_max[i] = i_max;
+            snap_effective_t2w[i] =
+                total_max_motor_thrust(p) / fmaxf(p->mass * p->gravity, 1e-6f);
+            snap_usable_t2w_true[i] = max_cmd * snap_effective_t2w[i];
+            snap_hover_fraction[i] =
+                snap_usable_t2w_true[i] > 1e-6f ? 1.0f / snap_usable_t2w_true[i] : 0.0f;
+            snap_thrust_margin[i] = snap_usable_t2w_true[i] - 1.0f;
+            float min_motor_scale = p->motor_thrust_scale[0];
+            float max_motor_scale = p->motor_thrust_scale[0];
+            float sum_motor_scale = 0.0f;
+            float max_motor_tau = p->motor_tau[0];
+            for (int m = 0; m < 4; m++) {
+                if (p->motor_thrust_scale[m] < min_motor_scale) {
+                    min_motor_scale = p->motor_thrust_scale[m];
+                }
+                if (p->motor_thrust_scale[m] > max_motor_scale) {
+                    max_motor_scale = p->motor_thrust_scale[m];
+                }
+                if (p->motor_tau[m] > max_motor_tau) {
+                    max_motor_tau = p->motor_tau[m];
+                }
+                sum_motor_scale += p->motor_thrust_scale[m];
+            }
+            snap_min_motor_scale[i] = min_motor_scale;
+            snap_mean_motor_scale[i] = sum_motor_scale * 0.25f;
+            snap_max_motor_scale[i] = max_motor_scale;
+            snap_max_motor_tau[i] = max_motor_tau;
+            snap_motor_tau_max[i] = max_motor_tau;
+            snap_com_offset_norm[i] = sqrtf(p->com_x * p->com_x + p->com_y * p->com_y
+                                            + p->com_z * p->com_z);
+            snap_action_cap[i] = max_cmd;
+        }
+
+        if (reset_state_interval > 0 && policy.step > 0 &&
+            policy.step % reset_state_interval == 0) {
+            size_t state_count = (size_t)M4D_DEPLOY_NUM_LAYERS * env->num_agents *
+                                 M4D_DEPLOY_HIDDEN_SIZE;
+            memcpy(state_backup, policy.state, state_count * sizeof(float));
+            m4d_deploy_forward_no_reset(&policy, env->observations, continued_actions);
+            memcpy(policy.state, state_backup, state_count * sizeof(float));
+            m4d_deploy_reset_state(&policy);
+            m4d_deploy_forward_no_reset(&policy, env->observations, env->actions);
+            policy.step += 1;
+
+            for (int i = 0; i < env->num_agents; i++) {
+                float jump = 0.0f;
+                for (int a = 0; a < 4; a++) {
+                    jump += fabsf(env->actions[4 * i + a] - continued_actions[4 * i + a]);
+                }
+                jump *= 0.25f;
+                reset_jump_sum += jump;
+                if (jump > reset_jump_max) reset_jump_max = jump;
+                reset_jump_count += 1;
+                ep_reset_jump_sum[i] += jump;
+                ep_reset_jump_count[i] += 1;
+            }
+        } else {
+            m4d_deploy_forward(&policy, env->observations, env->actions);
+        }
+
+        count_nonfinite_array(env->actions, (size_t)env->num_agents * 4, &nan_inf_count);
+        for (int i = 0; i < env->num_agents; i++) {
+            float action_abs = 0.0f;
+            float saturation = 0.0f;
+            for (int a = 0; a < 4; a++) {
+                float abs_action = fabsf(env->actions[4 * i + a]);
+                action_abs += abs_action;
+                if (abs_action >= 0.99f) saturation += 1.0f;
+            }
+            ep_action_abs_sum[i] += action_abs * 0.25f;
+            ep_action_saturation_sum[i] += saturation * 0.25f;
+
+            if (has_prev_action[i]) {
+                float delta = 0.0f;
+                for (int a = 0; a < 4; a++) {
+                    delta += fabsf(env->actions[4 * i + a] - prev_actions[4 * i + a]);
+                }
+                float mean_delta = 0.25f * delta;
+                action_delta_sum += mean_delta;
+                action_delta_count += 1;
+                ep_action_delta_sum[i] += mean_delta;
+                ep_action_delta_count[i] += 1;
+            }
+            for (int a = 0; a < 4; a++) {
+                prev_actions[4 * i + a] = env->actions[4 * i + a];
+            }
+            has_prev_action[i] = 1;
+        }
 
         if (step < trace_steps) {
             Drone* agent = &env->agents[0];
@@ -251,6 +565,7 @@ int main(int argc, char** argv) {
         }
 
         c_step(env);
+        count_nonfinite_array(env->rewards, env->num_agents, &nan_inf_count);
 
         if (step < trace_steps) {
             Drone* agent = &env->agents[0];
@@ -292,8 +607,45 @@ int main(int argc, char** argv) {
                 }
 
                 completed += 1;
+                if (episode_csv != NULL) {
+                    float length = fmaxf((float)episode_lengths[i], 1.0f);
+                    float mean_abs_action_ep = ep_action_abs_sum[i] / length;
+                    float saturation_ep = ep_action_saturation_sum[i] / length;
+                    float mean_delta_ep = ep_action_delta_count[i] > 0
+                        ? ep_action_delta_sum[i] / (float)ep_action_delta_count[i]
+                        : 0.0f;
+                    float reset_jump_ep = ep_reset_jump_count[i] > 0
+                        ? ep_reset_jump_sum[i] / (float)ep_reset_jump_count[i]
+                        : 0.0f;
+                    fprintf(episode_csv,
+                            "%d,%d,%s,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+                            "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+                            "%.9g,%.9g,%.9g,%s,%.9g,%s,%.9g,%.9g,%.9g,%.9g,"
+                            "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
+                            completed, i, timeout ? "timeout" : "oob", episode_lengths[i],
+                            episode_returns[i], snap_mass_scale[i], snap_i_scale_mean[i],
+                            snap_i_scale_min[i], snap_i_scale_max[i], snap_effective_t2w[i],
+                            snap_usable_t2w_true[i], snap_hover_fraction[i],
+                            snap_thrust_margin[i], snap_min_motor_scale[i],
+                            snap_mean_motor_scale[i], snap_max_motor_scale[i],
+                            snap_max_motor_tau[i], snap_min_motor_scale[i],
+                            snap_max_motor_scale[i], snap_motor_tau_max[i], snap_com_offset_norm[i],
+                            "", env->action_latency, "", env->sensor_noise, snap_action_cap[i],
+                            snap_action_cap[i], mean_abs_action_ep, saturation_ep,
+                            mean_delta_ep, saturation_ep, mean_delta_ep, reset_jump_ep,
+                            ep_max_dist[i], ep_max_omega[i]);
+                }
                 episode_returns[i] = 0.0f;
                 episode_lengths[i] = 0;
+                has_prev_action[i] = 0;
+                ep_action_abs_sum[i] = 0.0f;
+                ep_action_saturation_sum[i] = 0.0f;
+                ep_action_delta_sum[i] = 0.0f;
+                ep_action_delta_count[i] = 0;
+                ep_reset_jump_sum[i] = 0.0f;
+                ep_reset_jump_count[i] = 0;
+                ep_max_dist[i] = 0.0f;
+                ep_max_omega[i] = 0.0f;
 
                 if (completed >= target_episodes) {
                     break;
@@ -311,6 +663,14 @@ int main(int argc, char** argv) {
     double timeout_rate = (double)timeout_count / (double)completed;
     double oob_rate = (double)oob_count / (double)completed;
     double mean_len = sum_len / (double)completed;
+    float p95_dist = percentile(&dist_samples, 0.95f);
+    float p99_dist = percentile(&dist_samples, 0.99f);
+    float p95_omega = percentile(&omega_samples, 0.95f);
+    float p99_omega = percentile(&omega_samples, 0.99f);
+    double mean_abs_delta_action =
+        action_delta_count > 0 ? action_delta_sum / (double)action_delta_count : 0.0;
+    double reset32_action_jump =
+        reset_jump_count > 0 ? reset_jump_sum / (double)reset_jump_count : 0.0;
 
     printf("summary episodes=%d mean_return=%.6f std_return=%.6f min_return=%.6f "
            "max_return=%.6f timeout_rate=%.6f oob_rate=%.6f mean_len=%.6f\n",
@@ -328,18 +688,65 @@ int main(int argc, char** argv) {
                env->log.mean_abs_action / n, env->log.action_saturation_frac / n,
                env->log.motor_clip_low_frac / n, env->log.motor_clip_high_frac / n);
     }
+    printf("smoothness mean_abs_delta_action=%.6f reset32_action_jump=%.6f "
+           "reset32_action_jump_max=%.6f reset32_action_jump_count=%ld\n",
+           mean_abs_delta_action, reset32_action_jump, reset_jump_max, reset_jump_count);
+    printf("percentiles p95_dist=%.6f p99_dist=%.6f p95_omega=%.6f p99_omega=%.6f "
+           "samples=%zu nan_inf_count=%ld\n",
+           p95_dist, p99_dist, p95_omega, p99_omega, dist_samples.len, nan_inf_count);
     printf("csv,%s,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", config,
            env->action_scale, env->num_agents, completed, mean_return, std_return, min_return,
            max_return, timeout_rate, oob_rate, mean_len);
+    printf("csv_extended,%s,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+           "%.6f,%.6f,%.6f,%.6f,%ld\n",
+           config, env->action_scale, env->num_agents, completed, oob_rate, timeout_rate,
+           env->log.n > 0.0f ? env->log.ema_dist / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.ema_vel / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.ema_omega_z / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.mean_abs_action / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.action_saturation_frac / env->log.n : 0.0f,
+           mean_abs_delta_action, p95_dist, p99_dist, p95_omega, p99_omega, nan_inf_count);
 
     c_close(env);
     m4d_deploy_close(&policy);
+    if (episode_csv != NULL) {
+        fclose(episode_csv);
+    }
     free(env->observations);
     free(env->actions);
     free(env->rewards);
     free(env->terminals);
     free(episode_returns);
     free(episode_lengths);
+    free(prev_actions);
+    free(has_prev_action);
+    free(continued_actions);
+    free(state_backup);
+    free(ep_action_abs_sum);
+    free(ep_action_saturation_sum);
+    free(ep_action_delta_sum);
+    free(ep_action_delta_count);
+    free(ep_reset_jump_sum);
+    free(ep_reset_jump_count);
+    free(ep_max_dist);
+    free(ep_max_omega);
+    free(snap_mass_scale);
+    free(snap_i_scale_mean);
+    free(snap_i_scale_min);
+    free(snap_i_scale_max);
+    free(snap_effective_t2w);
+    free(snap_usable_t2w_true);
+    free(snap_hover_fraction);
+    free(snap_thrust_margin);
+    free(snap_min_motor_scale);
+    free(snap_mean_motor_scale);
+    free(snap_max_motor_scale);
+    free(snap_max_motor_tau);
+    free(snap_motor_tau_max);
+    free(snap_com_offset_norm);
+    free(snap_action_cap);
+    free(dist_samples.data);
+    free(omega_samples.data);
     free(env);
     return 0;
 }

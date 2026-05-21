@@ -65,6 +65,7 @@ typedef __nv_bfloat16 precision_t;
 struct DroneCudaParams {
     float mass, ixx, iyy, izz;
     float motor_x[4], motor_y[4], yaw_sign[4];
+    float motor_thrust_scale[4], motor_tau[4], yaw_torque_scale[4];
     float k_thrust, k_ang_damp, k_drag, b_drag, gravity;
     float max_rpm, max_vel, max_omega, k_mot, action_scale;
     int action_mode;
@@ -217,6 +218,15 @@ struct DroneCudaCtx {
     float domain_randomization;
     float dr_mass, dr_inertia, dr_k_thrust, dr_linear_drag, dr_yaw_drag, dr_motor_lag;
     float dr_com_xy, dr_com_z;
+    float dr_authority_gated;
+    float dr_usable_t2w_min, dr_usable_t2w_max;
+    float dr_mass_min, dr_mass_max;
+    float dr_inertia_min, dr_inertia_max;
+    float dr_motor_thrust_min, dr_motor_thrust_max;
+    float dr_motor_tau_min, dr_motor_tau_max;
+    float dr_yaw_torque_min, dr_yaw_torque_max;
+    float dr_linear_drag_min, dr_linear_drag_max;
+    float dr_angular_damping_min, dr_angular_damping_max;
     float action_scale;
     int action_mode;
     float normalized_thrust_min, normalized_thrust_max;
@@ -355,8 +365,33 @@ __device__ __forceinline__ float dr_sample_mult_dev(curandStatePhilox4_32_10_t* 
     return rndf_dev(1.0f - range, 1.0f + range, rng);
 }
 
+__device__ __forceinline__ bool dr_authority_gated_dev(const DroneCudaCtx& cfg) {
+    return cfg.domain_randomization > 0.0f && cfg.dr_authority_gated > 0.0f;
+}
+
+__device__ __forceinline__ float dr_sample_range_dev(curandStatePhilox4_32_10_t* rng,
+                                                     float lo, float hi, float fallback) {
+    if (hi <= lo) return fallback;
+    return rndf_dev(lo, hi, rng);
+}
+
+__device__ __forceinline__ float motor_thrust_coeff_dev(const DroneCudaParams* p, int i) {
+    return p->k_thrust * p->motor_thrust_scale[i];
+}
+
+__device__ __forceinline__ float max_motor_thrust_i_dev(const DroneCudaParams* p, int i) {
+    return motor_thrust_coeff_dev(p, i) * p->max_rpm * p->max_rpm;
+}
+
+__device__ float total_max_motor_thrust_dev(const DroneCudaParams* p) {
+    float total = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 4; i++) total += max_motor_thrust_i_dev(p, i);
+    return total;
+}
+
 __device__ float max_motor_thrust_dev(const DroneCudaParams* p) {
-    return p->k_thrust * p->max_rpm * p->max_rpm;
+    return 0.25f * total_max_motor_thrust_dev(p);
 }
 
 __device__ bool solve_allocation_dev(const DroneCudaParams* p, float total_thrust,
@@ -396,10 +431,9 @@ __device__ bool solve_allocation_dev(const DroneCudaParams* p, float total_thrus
         }
     }
 
-    float max_t = max_motor_thrust_dev(p);
     #pragma unroll
     for (int i = 0; i < 4; i++) {
-        out[i] = clampf_dev(a[i][4], 0.0f, max_t);
+        out[i] = clampf_dev(a[i][4], 0.0f, max_motor_thrust_i_dev(p, i));
     }
     return true;
 }
@@ -412,9 +446,15 @@ __device__ void hover_trim_thrusts_dev(const DroneCudaParams* p, float out[4]) {
     }
 }
 
+__device__ __forceinline__ float thrust_to_rpm_i_dev(const DroneCudaParams* p, int i,
+                                                     float thrust) {
+    float k = fmaxf(motor_thrust_coeff_dev(p, i), 1e-12f);
+    thrust = clampf_dev(thrust, 0.0f, max_motor_thrust_i_dev(p, i));
+    return sqrtf(thrust / k);
+}
+
 __device__ __forceinline__ float thrust_to_rpm_dev(const DroneCudaParams* p, float thrust) {
-    thrust = clampf_dev(thrust, 0.0f, max_motor_thrust_dev(p));
-    return sqrtf(thrust / p->k_thrust);
+    return thrust_to_rpm_i_dev(p, 0, thrust);
 }
 
 __device__ __forceinline__ float normalized_thrust_command_dev(const DroneCudaParams* p,
@@ -427,14 +467,58 @@ __device__ __forceinline__ float normalized_thrust_command_dev(const DroneCudaPa
 
 __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
                                 curandStatePhilox4_32_10_t* rng) {
-    float mass_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_mass));
-    float ixx_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
-    float iyy_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
-    float izz_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
+    bool authority_gated = dr_authority_gated_dev(cfg);
+    float mass_mult = authority_gated
+        ? dr_sample_range_dev(rng, cfg.dr_mass_min, cfg.dr_mass_max, 1.0f)
+        : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_mass));
+    float ixx_mult = authority_gated
+        ? dr_sample_range_dev(rng, cfg.dr_inertia_min, cfg.dr_inertia_max, 1.0f)
+        : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
+    float iyy_mult = authority_gated
+        ? dr_sample_range_dev(rng, cfg.dr_inertia_min, cfg.dr_inertia_max, 1.0f)
+        : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
+    float izz_mult = authority_gated
+        ? dr_sample_range_dev(rng, cfg.dr_inertia_min, cfg.dr_inertia_max, 1.0f)
+        : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
     float k_thrust_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_k_thrust));
-    float linear_drag_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_linear_drag));
+    float linear_drag_mult = authority_gated
+        ? dr_sample_range_dev(rng, cfg.dr_linear_drag_min, cfg.dr_linear_drag_max, 1.0f)
+        : dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_linear_drag));
     float yaw_drag_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_yaw_drag));
     float motor_lag_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_motor_lag));
+    float angular_damping_mult = authority_gated
+        ? dr_sample_range_dev(rng, cfg.dr_angular_damping_min, cfg.dr_angular_damping_max, 1.0f)
+        : 1.0f;
+    float motor_thrust_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float motor_tau[4] = {
+        BASE_K_MOT * motor_lag_mult, BASE_K_MOT * motor_lag_mult,
+        BASE_K_MOT * motor_lag_mult, BASE_K_MOT * motor_lag_mult
+    };
+    float yaw_torque_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    if (authority_gated) {
+        float sum_motor_scale = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 4; i++) {
+            motor_thrust_scale[i] = dr_sample_range_dev(
+                rng, cfg.dr_motor_thrust_min, cfg.dr_motor_thrust_max, 1.0f);
+            motor_tau[i] = dr_sample_range_dev(
+                rng, cfg.dr_motor_tau_min, cfg.dr_motor_tau_max, BASE_K_MOT);
+            yaw_torque_scale[i] = dr_sample_range_dev(
+                rng, cfg.dr_yaw_torque_min, cfg.dr_yaw_torque_max, 1.0f);
+            sum_motor_scale += motor_thrust_scale[i];
+        }
+        float cap = clampf_dev(cfg.normalized_thrust_max, 1e-3f, 1.0f);
+        float usable_t2w = dr_sample_range_dev(
+            rng, cfg.dr_usable_t2w_min, cfg.dr_usable_t2w_max, 2.5f);
+        float base_motor_max = BASE_K_THRUST * BASE_MAX_RPM * BASE_MAX_RPM;
+        k_thrust_mult = usable_t2w * (BASE_MASS * mass_mult * BASE_GRAVITY)
+            / fmaxf(cap * base_motor_max * sum_motor_scale, 1e-6f);
+        yaw_drag_mult = 1.0f;
+        motor_lag_mult = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 4; i++) motor_lag_mult += motor_tau[i] / BASE_K_MOT;
+        motor_lag_mult *= 0.25f;
+    }
 
     float com_xy = cfg.domain_randomization > 0.0f ? fabsf(cfg.dr_com_xy) : 0.0f;
     float com_z_range = cfg.domain_randomization > 0.0f ? fabsf(cfg.dr_com_z) : 0.0f;
@@ -447,7 +531,7 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
     p->iyy = BASE_IYY * iyy_mult;
     p->izz = BASE_IZZ * izz_mult;
     p->k_thrust = BASE_K_THRUST * k_thrust_mult;
-    p->k_ang_damp = BASE_K_ANG_DAMP;
+    p->k_ang_damp = BASE_K_ANG_DAMP * angular_damping_mult;
     p->k_drag = BASE_K_DRAG * yaw_drag_mult;
     p->b_drag = BASE_B_DRAG * linear_drag_mult;
     p->gravity = BASE_GRAVITY;
@@ -470,6 +554,12 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
     p->linear_drag_mult = linear_drag_mult;
     p->yaw_drag_mult = yaw_drag_mult;
     p->motor_lag_mult = motor_lag_mult;
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        p->motor_thrust_scale[i] = motor_thrust_scale[i];
+        p->motor_tau[i] = motor_tau[i];
+        p->yaw_torque_scale[i] = yaw_torque_scale[i];
+    }
 
     p->motor_x[0] = BASE_MOTOR_FL_X - com_x;
     p->motor_y[0] = BASE_MOTOR_FL_Y - com_y;
@@ -489,23 +579,23 @@ __device__ void compute_derivatives_dev(const DroneCudaState* s, const DroneCuda
                                         const float actions[4], DroneCudaDerivative* d) {
     float trim[4];
     hover_trim_thrusts_dev(p, trim);
-    float max_thrust = max_motor_thrust_dev(p);
     float target_rpms[4];
     bool hover_equilibrium = p->action_mode == M4D_ACTION_HOVER_TRIM;
     #pragma unroll
     for (int i = 0; i < 4; i++) {
         float target_thrust;
+        float max_thrust_i = max_motor_thrust_i_dev(p, i);
         if (p->action_mode == M4D_ACTION_NORMALIZED_THRUST) {
-            target_thrust = normalized_thrust_command_dev(p, actions[i]) * max_thrust;
+            target_thrust = normalized_thrust_command_dev(p, actions[i]) * max_thrust_i;
         } else {
             float action = clampf_dev(actions[i] * p->action_scale, -1.0f, 1.0f);
             if (fabsf(action) > 1e-8f) hover_equilibrium = false;
             target_thrust = action >= 0.0f
-                ? trim[i] + action * (max_thrust - trim[i])
+                ? trim[i] + action * (max_thrust_i - trim[i])
                 : trim[i] + action * trim[i];
         }
-        target_rpms[i] = thrust_to_rpm_dev(p, target_thrust);
-        d->rpm_dot[i] = (1.0f / p->k_mot) * (target_rpms[i] - s->rpms[i]);
+        target_rpms[i] = thrust_to_rpm_i_dev(p, i, target_thrust);
+        d->rpm_dot[i] = (1.0f / fmaxf(p->motor_tau[i], 1e-4f)) * (target_rpms[i] - s->rpms[i]);
         if (fabsf(target_rpms[i] - s->rpms[i]) > 1e-3f) hover_equilibrium = false;
     }
 
@@ -513,7 +603,7 @@ __device__ void compute_derivatives_dev(const DroneCudaState* s, const DroneCuda
     #pragma unroll
     for (int i = 0; i < 4; i++) {
         float rpm = fmaxf(s->rpms[i], 0.0f);
-        T[i] = p->k_thrust * rpm * rpm;
+        T[i] = motor_thrust_coeff_dev(p, i) * rpm * rpm;
     }
 
     float3 f_prop_body = make_float3(0.0f, 0.0f, T[0] + T[1] + T[2] + T[3]);
@@ -535,7 +625,7 @@ __device__ void compute_derivatives_dev(const DroneCudaState* s, const DroneCuda
     for (int i = 0; i < 4; i++) {
         tau_prop.x += p->motor_y[i] * T[i];
         tau_prop.y += -p->motor_x[i] * T[i];
-        tau_prop.z += p->k_drag * p->yaw_sign[i] * T[i];
+        tau_prop.z += p->k_drag * p->yaw_torque_scale[i] * p->yaw_sign[i] * T[i];
     }
     if (hover_equilibrium) {
         tau_prop = make_float3(0.0f, 0.0f, 0.0f);
@@ -671,7 +761,7 @@ __device__ void reset_one_dev(DroneCudaState* s, DroneCudaParams* p, const Drone
     hover_trim_thrusts_dev(p, trim);
     #pragma unroll
     for (int i = 0; i < 4; i++) {
-        s->rpms[i] = thrust_to_rpm_dev(p, trim[i]);
+        s->rpms[i] = thrust_to_rpm_i_dev(p, i, trim[i]);
     }
 
     float pos_scale = clampf_dev(cfg.reset_pos_scale, 0.0f, 1.0f);
@@ -819,7 +909,7 @@ __device__ void log_done_dev(DroneCudaLog* log, const DroneCudaState* s,
     float trim_rpm_max = 0.0f;
     #pragma unroll
     for (int i = 0; i < 4; i++) {
-        float rpm = thrust_to_rpm_dev(p, trim[i]);
+        float rpm = thrust_to_rpm_i_dev(p, i, trim[i]);
         trim_rpm_sum += rpm;
         trim_rpm_max = fmaxf(trim_rpm_max, rpm);
     }
@@ -840,10 +930,24 @@ __device__ void log_done_dev(DroneCudaLog* log, const DroneCudaState* s,
     atomicAdd(&log->ixx_mult_mean, p->ixx_mult);
     atomicAdd(&log->iyy_mult_mean, p->iyy_mult);
     atomicAdd(&log->izz_mult_mean, p->izz_mult);
-    atomicAdd(&log->k_thrust_mult_mean, p->k_thrust_mult);
-    float k_range = dr_param_range_dev(cfg, cfg.dr_k_thrust);
-    atomicAdd(&log->k_thrust_mult_min, 1.0f - k_range);
-    atomicAdd(&log->k_thrust_mult_max, 1.0f + k_range);
+    float motor_scale_min = p->motor_thrust_scale[0];
+    float motor_scale_max = p->motor_thrust_scale[0];
+    float motor_scale_sum = 0.0f;
+    #pragma unroll
+    for (int m = 0; m < 4; m++) {
+        motor_scale_min = fminf(motor_scale_min, p->motor_thrust_scale[m]);
+        motor_scale_max = fmaxf(motor_scale_max, p->motor_thrust_scale[m]);
+        motor_scale_sum += p->motor_thrust_scale[m];
+    }
+    atomicAdd(&log->k_thrust_mult_mean, p->k_thrust_mult * motor_scale_sum * 0.25f);
+    if (dr_authority_gated_dev(cfg)) {
+        atomicAdd(&log->k_thrust_mult_min, p->k_thrust_mult * motor_scale_min);
+        atomicAdd(&log->k_thrust_mult_max, p->k_thrust_mult * motor_scale_max);
+    } else {
+        float k_range = dr_param_range_dev(cfg, cfg.dr_k_thrust);
+        atomicAdd(&log->k_thrust_mult_min, 1.0f - k_range);
+        atomicAdd(&log->k_thrust_mult_max, 1.0f + k_range);
+    }
     atomicAdd(&log->linear_drag_mult_mean, p->linear_drag_mult);
     atomicAdd(&log->yaw_drag_mult_mean, p->yaw_drag_mult);
     atomicAdd(&log->motor_lag_mult_mean, p->motor_lag_mult);
@@ -985,6 +1089,23 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.dr_motor_lag = dict_float(env_kwargs, "dr_motor_lag", 0.0f);
     ctx.dr_com_xy = dict_float(env_kwargs, "dr_com_xy", 0.0f);
     ctx.dr_com_z = dict_float(env_kwargs, "dr_com_z", 0.0f);
+    ctx.dr_authority_gated = dict_float(env_kwargs, "dr_authority_gated", 0.0f);
+    ctx.dr_usable_t2w_min = dict_float(env_kwargs, "dr_usable_t2w_min", 0.0f);
+    ctx.dr_usable_t2w_max = dict_float(env_kwargs, "dr_usable_t2w_max", 0.0f);
+    ctx.dr_mass_min = dict_float(env_kwargs, "dr_mass_min", 1.0f);
+    ctx.dr_mass_max = dict_float(env_kwargs, "dr_mass_max", 1.0f);
+    ctx.dr_inertia_min = dict_float(env_kwargs, "dr_inertia_min", 1.0f);
+    ctx.dr_inertia_max = dict_float(env_kwargs, "dr_inertia_max", 1.0f);
+    ctx.dr_motor_thrust_min = dict_float(env_kwargs, "dr_motor_thrust_min", 1.0f);
+    ctx.dr_motor_thrust_max = dict_float(env_kwargs, "dr_motor_thrust_max", 1.0f);
+    ctx.dr_motor_tau_min = dict_float(env_kwargs, "dr_motor_tau_min", BASE_K_MOT);
+    ctx.dr_motor_tau_max = dict_float(env_kwargs, "dr_motor_tau_max", BASE_K_MOT);
+    ctx.dr_yaw_torque_min = dict_float(env_kwargs, "dr_yaw_torque_min", 1.0f);
+    ctx.dr_yaw_torque_max = dict_float(env_kwargs, "dr_yaw_torque_max", 1.0f);
+    ctx.dr_linear_drag_min = dict_float(env_kwargs, "dr_linear_drag_min", 1.0f);
+    ctx.dr_linear_drag_max = dict_float(env_kwargs, "dr_linear_drag_max", 1.0f);
+    ctx.dr_angular_damping_min = dict_float(env_kwargs, "dr_angular_damping_min", 1.0f);
+    ctx.dr_angular_damping_max = dict_float(env_kwargs, "dr_angular_damping_max", 1.0f);
     ctx.action_scale = dict_float(env_kwargs, "action_scale", 1.0f);
     ctx.action_mode = (int)dict_float(env_kwargs, "action_mode", (float)M4D_ACTION_HOVER_TRIM);
     ctx.normalized_thrust_min = dict_float(env_kwargs, "normalized_thrust_min", 0.0f);
@@ -1114,8 +1235,10 @@ static void hover_trim_thrusts_host(const DroneCudaParams* p, float out[4]) {
         {1.0f, 1.0f, 1.0f, 1.0f, p->mass * p->gravity},
         {p->motor_y[0], p->motor_y[1], p->motor_y[2], p->motor_y[3], 0.0f},
         {-p->motor_x[0], -p->motor_x[1], -p->motor_x[2], -p->motor_x[3], 0.0f},
-        {p->k_drag * p->yaw_sign[0], p->k_drag * p->yaw_sign[1],
-         p->k_drag * p->yaw_sign[2], p->k_drag * p->yaw_sign[3], 0.0f},
+        {p->k_drag * p->yaw_torque_scale[0] * p->yaw_sign[0],
+         p->k_drag * p->yaw_torque_scale[1] * p->yaw_sign[1],
+         p->k_drag * p->yaw_torque_scale[2] * p->yaw_sign[2],
+         p->k_drag * p->yaw_torque_scale[3] * p->yaw_sign[3], 0.0f},
     };
 
     bool ok = true;
@@ -1155,8 +1278,8 @@ static void hover_trim_thrusts_host(const DroneCudaParams* p, float out[4]) {
         return;
     }
 
-    float max_t = p->k_thrust * p->max_rpm * p->max_rpm;
     for (int i = 0; i < 4; i++) {
+        float max_t = p->k_thrust * p->motor_thrust_scale[i] * p->max_rpm * p->max_rpm;
         out[i] = fminf(fmaxf(a[i][4], 0.0f), max_t);
     }
 }

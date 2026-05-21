@@ -60,6 +60,23 @@ struct DroneEnv {
     float dr_motor_lag;
     float dr_com_xy;
     float dr_com_z;
+    float dr_authority_gated;
+    float dr_usable_t2w_min;
+    float dr_usable_t2w_max;
+    float dr_mass_min;
+    float dr_mass_max;
+    float dr_inertia_min;
+    float dr_inertia_max;
+    float dr_motor_thrust_min;
+    float dr_motor_thrust_max;
+    float dr_motor_tau_min;
+    float dr_motor_tau_max;
+    float dr_yaw_torque_min;
+    float dr_yaw_torque_max;
+    float dr_linear_drag_min;
+    float dr_linear_drag_max;
+    float dr_angular_damping_min;
+    float dr_angular_damping_max;
     float action_scale;
     int action_mode;
     float normalized_thrust_min;
@@ -168,7 +185,7 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     float trim_rpm_max = 0.0f;
     hover_trim_thrusts(&agent->params, trim);
     for (int m = 0; m < 4; m++) {
-        float rpm = thrust_to_rpm(&agent->params, trim[m]);
+        float rpm = thrust_to_rpm_i(&agent->params, m, trim[m]);
         trim_rpm_sum += rpm;
         if (rpm > trim_rpm_max) trim_rpm_max = rpm;
     }
@@ -191,11 +208,25 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     env->log.ixx_mult_mean += agent->params.ixx_mult;
     env->log.iyy_mult_mean += agent->params.iyy_mult;
     env->log.izz_mult_mean += agent->params.izz_mult;
-    env->log.k_thrust_mult_mean += agent->params.k_thrust_mult;
+    float motor_scale_min = agent->params.motor_thrust_scale[0];
+    float motor_scale_max = agent->params.motor_thrust_scale[0];
+    float motor_scale_sum = 0.0f;
+    for (int m = 0; m < 4; m++) {
+        float s = agent->params.motor_thrust_scale[m];
+        if (s < motor_scale_min) motor_scale_min = s;
+        if (s > motor_scale_max) motor_scale_max = s;
+        motor_scale_sum += s;
+    }
+    env->log.k_thrust_mult_mean += agent->params.k_thrust_mult * motor_scale_sum * 0.25f;
     DomainRandomization dr = env_domain_randomization(env);
-    float k_thrust_range = dr_param_range(&dr, dr.k_thrust);
-    env->log.k_thrust_mult_min += 1.0f - k_thrust_range;
-    env->log.k_thrust_mult_max += 1.0f + k_thrust_range;
+    if (dr_authority_gated(&dr)) {
+        env->log.k_thrust_mult_min += agent->params.k_thrust_mult * motor_scale_min;
+        env->log.k_thrust_mult_max += agent->params.k_thrust_mult * motor_scale_max;
+    } else {
+        float k_thrust_range = dr_param_range(&dr, dr.k_thrust);
+        env->log.k_thrust_mult_min += 1.0f - k_thrust_range;
+        env->log.k_thrust_mult_max += 1.0f + k_thrust_range;
+    }
     env->log.linear_drag_mult_mean += agent->params.linear_drag_mult;
     env->log.yaw_drag_mult_mean += agent->params.yaw_drag_mult;
     env->log.motor_lag_mult_mean += agent->params.motor_lag_mult;
@@ -260,6 +291,24 @@ static inline DomainRandomization env_domain_randomization(DroneEnv* env) {
         .motor_lag = env->dr_motor_lag,
         .com_xy = env->dr_com_xy,
         .com_z = env->dr_com_z,
+        .authority_gated = env->dr_authority_gated,
+        .normalized_thrust_max = env->normalized_thrust_max,
+        .usable_t2w_min = env->dr_usable_t2w_min,
+        .usable_t2w_max = env->dr_usable_t2w_max,
+        .mass_min = env->dr_mass_min,
+        .mass_max = env->dr_mass_max,
+        .inertia_min = env->dr_inertia_min,
+        .inertia_max = env->dr_inertia_max,
+        .motor_thrust_min = env->dr_motor_thrust_min,
+        .motor_thrust_max = env->dr_motor_thrust_max,
+        .motor_tau_min = env->dr_motor_tau_min,
+        .motor_tau_max = env->dr_motor_tau_max,
+        .yaw_torque_min = env->dr_yaw_torque_min,
+        .yaw_torque_max = env->dr_yaw_torque_max,
+        .linear_drag_min = env->dr_linear_drag_min,
+        .linear_drag_max = env->dr_linear_drag_max,
+        .angular_damping_min = env->dr_angular_damping_min,
+        .angular_damping_max = env->dr_angular_damping_max,
     };
 }
 
