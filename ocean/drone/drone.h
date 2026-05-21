@@ -44,6 +44,9 @@ struct DroneEnv {
     float alpha_omega_z;
     float alpha_omega_z_sq;
     float alpha_omega_z_mult;
+    float alpha_action_delta;
+    float alpha_reset_action_delta;
+    int reset_action_interval;
 
     // hover task parameters
     float hover_target_dist;
@@ -106,7 +109,8 @@ static inline DomainRandomization env_domain_randomization(DroneEnv* env);
 
 static inline void record_step_metrics(Drone* agent, float raw_actions[4], float r_dist,
                                         float r_hover, float r_shaping, float r_omega,
-                                        float r_omega_xy, float r_omega_z, float r_terminal) {
+                                        float r_omega_xy, float r_omega_z, float r_terminal,
+                                        float action_delta_mean, float reset_action_jump) {
     float action_abs_sum = 0.0f;
     float action_clipped_abs_sum = 0.0f;
     float action_max_abs = 0.0f;
@@ -141,6 +145,9 @@ static inline void record_step_metrics(Drone* agent, float raw_actions[4], float
     agent->action_clipped_abs_sum += action_clipped_abs_sum / 4.0f;
     if (action_max_abs > agent->action_max_abs) agent->action_max_abs = action_max_abs;
     agent->action_saturation_count += action_saturation_count / 4.0f;
+    agent->action_delta_sum += action_delta_mean;
+    agent->reset_action_jump_sum += reset_action_jump;
+    if (reset_action_jump > 0.0f) agent->reset_action_jump_count += 1.0f;
     agent->motor_clip_low_count += motor_clip_low_count / 4.0f;
     agent->motor_clip_high_count += motor_clip_high_count / 4.0f;
     agent->instrumentation_steps += 1.0f;
@@ -152,6 +159,8 @@ static inline void record_step_metrics(Drone* agent, float raw_actions[4], float
     agent->r_omega_xy_sum += r_omega_xy;
     agent->r_omega_z_sum += r_omega_z;
     agent->r_terminal_sum += r_terminal;
+    for (int i = 0; i < 4; i++) agent->prev_action[i] = raw_actions[i];
+    agent->has_prev_action = 1;
 }
 
 void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
@@ -178,6 +187,10 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     env->log.mean_abs_action_clipped += agent->action_clipped_abs_sum / steps;
     env->log.max_abs_action += agent->action_max_abs;
     env->log.action_saturation_frac += agent->action_saturation_count / steps;
+    env->log.mean_abs_delta_action += agent->action_delta_sum / steps;
+    env->log.reset_action_jump_mean += agent->reset_action_jump_count > 0.0f
+        ? agent->reset_action_jump_sum / agent->reset_action_jump_count
+        : 0.0f;
     env->log.motor_clip_low_frac += agent->motor_clip_low_count / steps;
     env->log.motor_clip_high_frac += agent->motor_clip_high_count / steps;
 
@@ -332,6 +345,11 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->action_clipped_abs_sum = 0.0f;
     agent->action_max_abs = 0.0f;
     agent->action_saturation_count = 0.0f;
+    agent->action_delta_sum = 0.0f;
+    agent->reset_action_jump_sum = 0.0f;
+    agent->reset_action_jump_count = 0.0f;
+    agent->has_prev_action = 0;
+    for (int i = 0; i < 4; i++) agent->prev_action[i] = 0.0f;
     agent->motor_clip_low_count = 0.0f;
     agent->motor_clip_high_count = 0.0f;
     for (int i = 0; i < 4; i++) agent->rpm_sum[i] = 0.0f;
@@ -423,6 +441,16 @@ void c_step(DroneEnv* env) {
             env->actions[4 * i + 2],
             env->actions[4 * i + 3],
         };
+        float action_delta_mean = 0.0f;
+        if (agent->has_prev_action) {
+            for (int m = 0; m < 4; m++) {
+                action_delta_mean += fabsf(raw_actions[m] - agent->prev_action[m]);
+            }
+            action_delta_mean *= 0.25f;
+        }
+        bool reset_action_boundary = env->reset_action_interval > 0
+            && ((env->tick - 1 + env->reset_action_interval) % env->reset_action_interval) == 0;
+        float reset_action_jump = reset_action_boundary ? action_delta_mean : 0.0f;
         float delayed_actions[4];
         apply_action_latency(agent, raw_actions, env_action_latency_steps(env), delayed_actions);
         move_drone(agent, delayed_actions);
@@ -449,7 +477,9 @@ void c_step(DroneEnv* env) {
         float r_shaping = env->alpha_shaping * (curr - agent->prev_potential);
         float r_omega = r_omega_xy + r_omega_z;
         float r_terminal = 0.0f;
-        float reward = r_dist + r_hover + r_shaping + r_omega + r_terminal;
+        float r_action_delta = -env->alpha_action_delta * action_delta_mean
+                             -env->alpha_reset_action_delta * reset_action_jump;
+        float reward = r_dist + r_hover + r_shaping + r_omega + r_terminal + r_action_delta;
         
         agent->prev_potential = curr;
 
@@ -463,7 +493,8 @@ void c_step(DroneEnv* env) {
         agent->ema_omega_y = 0.99f * agent->ema_omega_y + 0.01f * fabsf(agent->state.omega.y);
         agent->ema_omega_z = 0.99f * agent->ema_omega_z + 0.01f * fabsf(agent->state.omega.z);
         record_step_metrics(agent, raw_actions, r_dist, r_hover, r_shaping, r_omega,
-                            r_omega_xy, r_omega_z, r_terminal);
+                            r_omega_xy, r_omega_z, r_terminal,
+                            action_delta_mean, reset_action_jump);
         agent->episode_return += reward;
         env->rewards[i] = reward;
 

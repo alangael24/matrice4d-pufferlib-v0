@@ -26,6 +26,9 @@ void my_init(Env* env, Dict* kwargs) {
     env->alpha_omega_z = dict_get(kwargs, "alpha_omega_z")->value;
     env->alpha_omega_z_sq = dict_get(kwargs, "alpha_omega_z_sq")->value;
     env->alpha_omega_z_mult = dict_get(kwargs, "alpha_omega_z_mult")->value;
+    env->alpha_action_delta = dict_get_default(kwargs, "alpha_action_delta", 0.0f);
+    env->alpha_reset_action_delta = dict_get_default(kwargs, "alpha_reset_action_delta", 0.0f);
+    env->reset_action_interval = (int)dict_get_default(kwargs, "reset_action_interval", 0.0f);
     env->hover_target_dist = dict_get(kwargs, "hover_target_dist")->value;
     env->oob_radius = dict_get(kwargs, "oob_radius")->value;
     env->hover_dist = dict_get(kwargs, "hover_dist")->value;
@@ -90,6 +93,8 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "mean_abs_action_clipped", log->mean_abs_action_clipped);
     dict_set(out, "max_abs_action", log->max_abs_action);
     dict_set(out, "action_saturation_frac", log->action_saturation_frac);
+    dict_set(out, "mean_abs_delta_action", log->mean_abs_delta_action);
+    dict_set(out, "reset_action_jump_mean", log->reset_action_jump_mean);
     dict_set(out, "motor_clip_low_frac", log->motor_clip_low_frac);
     dict_set(out, "motor_clip_high_frac", log->motor_clip_high_frac);
     dict_set(out, "hover_trim_rpm_mean", log->hover_trim_rpm_mean);
