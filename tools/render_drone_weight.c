@@ -7,6 +7,26 @@
 #include <string.h>
 #include <time.h>
 
+static float render_env_float(const char* key, float fallback) {
+    const char* value = getenv(key);
+    return value == NULL ? fallback : (float)atof(value);
+}
+
+static int env_action_mode(const char* key, int fallback) {
+    const char* value = getenv(key);
+    if (value == NULL) return fallback;
+    if (strcmp(value, "1") == 0 || strcmp(value, "normalized") == 0 ||
+        strcmp(value, "normalized_thrust") == 0) {
+        return M4D_ACTION_NORMALIZED_THRUST;
+    }
+    if (strcmp(value, "0") == 0 || strcmp(value, "hover_trim") == 0) {
+        return M4D_ACTION_HOVER_TRIM;
+    }
+    fprintf(stderr, "Unknown M4D_ACTION_MODE='%s'; valid: 0, hover_trim, 1, normalized_thrust\n",
+            value);
+    exit(2);
+}
+
 static void configure_common(DroneEnv* env) {
     env->num_agents = 4;
     env->max_rings = 10;
@@ -28,6 +48,9 @@ static void configure_common(DroneEnv* env) {
     env->hover_vel = 0.1f;
 
     env->action_scale = 0.5f;
+    env->action_mode = M4D_ACTION_HOVER_TRIM;
+    env->normalized_thrust_min = 0.0f;
+    env->normalized_thrust_max = 1.0f;
     env->reset_pos_scale = 1.0f;
     env->reset_yaw_range = 3.14159f;
     env->reset_vel_max = 0.2f;
@@ -151,8 +174,15 @@ int main(int argc, char** argv) {
     if (has_action_scale) {
         env->action_scale = action_scale;
     }
-    printf("config=%s action_scale=%.6f reset_state_interval=%d\n", config, env->action_scale,
-           reset_state_interval);
+    env->action_mode = env_action_mode("M4D_ACTION_MODE", env->action_mode);
+    env->normalized_thrust_min =
+        render_env_float("M4D_NORMALIZED_THRUST_MIN", env->normalized_thrust_min);
+    env->normalized_thrust_max =
+        render_env_float("M4D_NORMALIZED_THRUST_MAX", env->normalized_thrust_max);
+    printf("config=%s action_scale=%.6f action_mode=%d normalized_thrust_min=%.6f "
+           "normalized_thrust_max=%.6f reset_state_interval=%d\n",
+           config, env->action_scale, env->action_mode, env->normalized_thrust_min,
+           env->normalized_thrust_max, reset_state_interval);
     fflush(stdout);
 
     const size_t obs_size = 23;

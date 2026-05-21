@@ -151,15 +151,29 @@ def main() -> int:
             raise AssertionError(f"config/drone.ini should expose {key} = 0.0")
     if re.search(r"(?m)^action_scale\s*=\s*1\.0\s*$", config_text) is None:
         raise AssertionError("config/drone.ini should expose baseline action_scale = 1.0")
+    if re.search(r"(?m)^action_mode\s*=\s*0\s*$", config_text) is None:
+        raise AssertionError("config/drone.ini should keep legacy action_mode = 0 by default")
+    for key, value in [
+        ("normalized_thrust_min", "0.0"),
+        ("normalized_thrust_max", "1.0"),
+    ]:
+        if re.search(rf"(?m)^{key}\s*=\s*{re.escape(value)}\s*$", config_text) is None:
+            raise AssertionError(f"config/drone.ini should expose {key} = {value}")
 
     if "agent->params.action_scale = env->action_scale;" not in drone_h_text:
         raise AssertionError("env.action_scale is not wired into drone params")
+    if "agent->params.action_mode = env->action_mode;" not in drone_h_text:
+        raise AssertionError("env.action_mode is not wired into drone params")
     if "DomainRandomization dr = env_domain_randomization(env);" not in drone_h_text:
         raise AssertionError("env domain randomization config is not materialized on reset")
     if "init_drone(agent, &env->rng, &dr);" not in drone_h_text:
         raise AssertionError("granular domain randomization is not wired into init_drone")
     if "env->oob_radius = dict_get(kwargs, \"oob_radius\")->value;" not in binding_text:
         raise AssertionError("env.oob_radius is not wired through binding.c")
+    if "env->action_mode = (int)dict_get_default(kwargs, \"action_mode\"" not in binding_text:
+        raise AssertionError("env.action_mode is not wired through binding.c")
+    if "env->normalized_thrust_max = dict_get_default(kwargs, \"normalized_thrust_max\"" not in binding_text:
+        raise AssertionError("normalized thrust caps are not wired through binding.c")
     for key in [
         "dr_mass",
         "dr_inertia",

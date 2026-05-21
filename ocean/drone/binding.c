@@ -9,6 +9,11 @@
 #define Env DroneEnv
 #include "vecenv.h"
 
+static inline float dict_get_default(Dict* dict, const char* key, float fallback) {
+    DictItem* item = dict_get_unsafe(dict, key);
+    return item == NULL ? fallback : item->value;
+}
+
 void my_init(Env* env, Dict* kwargs) {
     env->num_agents = (int)dict_get(kwargs, "num_drones")->value;
     env->task = (int)dict_get(kwargs, "task")->value;
@@ -36,6 +41,9 @@ void my_init(Env* env, Dict* kwargs) {
     env->dr_com_xy = dict_get(kwargs, "dr_com_xy")->value;
     env->dr_com_z = dict_get(kwargs, "dr_com_z")->value;
     env->action_scale = dict_get(kwargs, "action_scale")->value;
+    env->action_mode = (int)dict_get_default(kwargs, "action_mode", (float)M4D_ACTION_HOVER_TRIM);
+    env->normalized_thrust_min = dict_get_default(kwargs, "normalized_thrust_min", 0.0f);
+    env->normalized_thrust_max = dict_get_default(kwargs, "normalized_thrust_max", 1.0f);
     env->reset_pos_scale = dict_get(kwargs, "reset_pos_scale")->value;
     env->reset_yaw_range = dict_get(kwargs, "reset_yaw_range")->value;
     env->reset_vel_max = dict_get(kwargs, "reset_vel_max")->value;

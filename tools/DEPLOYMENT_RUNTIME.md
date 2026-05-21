@@ -13,7 +13,11 @@ policy outside the trainer.
 - Recurrence reset: every `32` environment steps by default
 - Observation normalization: none
 - Action output: raw policy mean actions
-- Sim action handling: clamp raw actions to `[-1, 1]`, then apply `env.action_scale`
+- Sim action handling for current V0 checkpoints: `action_mode = 0`, clamp raw
+  actions to `[-1, 1]`, then apply `env.action_scale` around hover trim.
+- Experimental sim-to-real policies can use `action_mode = 1`, which maps raw
+  actions to normalized motor thrust with `normalized_thrust_min/max` caps. The
+  current V0 baseline checkpoints were not trained for that mode.
 
 ## Checkpoint Layout
 

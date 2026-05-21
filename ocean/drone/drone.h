@@ -61,6 +61,9 @@ struct DroneEnv {
     float dr_com_xy;
     float dr_com_z;
     float action_scale;
+    int action_mode;
+    float normalized_thrust_min;
+    float normalized_thrust_max;
     float reset_pos_scale;
     float reset_yaw_range;
     float reset_vel_max;
@@ -101,9 +104,17 @@ static inline void record_step_metrics(Drone* agent, float raw_actions[4], float
 
         float env_clipped = clampf(raw_actions[i], -1.0f, 1.0f);
         action_clipped_abs_sum += fabsf(env_clipped);
-        float motor_action = clampf(env_clipped * agent->params.action_scale, -1.0f, 1.0f);
-        if (motor_action <= -0.99f) motor_clip_low_count += 1.0f;
-        if (motor_action >= 0.99f) motor_clip_high_count += 1.0f;
+        if (agent->params.action_mode == M4D_ACTION_NORMALIZED_THRUST) {
+            float motor_cmd = normalized_thrust_command(&agent->params, env_clipped);
+            float lo = clampf(agent->params.normalized_thrust_min, 0.0f, 1.0f);
+            float hi = clampf(agent->params.normalized_thrust_max, lo, 1.0f);
+            if (motor_cmd <= lo + 1e-5f) motor_clip_low_count += 1.0f;
+            if (motor_cmd >= hi - 1e-5f) motor_clip_high_count += 1.0f;
+        } else {
+            float motor_action = clampf(env_clipped * agent->params.action_scale, -1.0f, 1.0f);
+            if (motor_action <= -0.99f) motor_clip_low_count += 1.0f;
+            if (motor_action >= 0.99f) motor_clip_high_count += 1.0f;
+        }
 
         agent->rpm_sum[i] += agent->state.rpms[i];
     }
@@ -288,6 +299,9 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     DomainRandomization dr = env_domain_randomization(env);
     init_drone(agent, &env->rng, &dr);
     agent->params.action_scale = env->action_scale;
+    agent->params.action_mode = env->action_mode;
+    agent->params.normalized_thrust_min = env->normalized_thrust_min;
+    agent->params.normalized_thrust_max = env->normalized_thrust_max;
 
     float pos_scale = clampf(env->reset_pos_scale, 0.0f, 1.0f);
     agent->state.pos = (Vec3){

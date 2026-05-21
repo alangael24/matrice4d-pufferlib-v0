@@ -62,6 +62,9 @@
 #define ACTION_DT (DT * (float)ACTION_SUBSTEPS) // 100 Hz
 #define MAX_ACTION_LATENCY_STEPS 8
 
+#define M4D_ACTION_HOVER_TRIM 0
+#define M4D_ACTION_NORMALIZED_THRUST 1
+
 #define DT_RNG 0.0f
 
 // Corner to corner distance
@@ -178,6 +181,9 @@ typedef struct {
     float max_omega;  // rad/s (observation clamp)
     float k_mot;      // s (motor RPM time constant)
     float action_scale; // policy action multiplier around hover trim
+    int action_mode;  // M4D_ACTION_* mapping from policy action to motor thrust
+    float normalized_thrust_min; // lower cap for normalized thrust mode
+    float normalized_thrust_max; // upper cap for normalized thrust mode
     float com_x;      // m, center-of-mass offset relative CAD datum
     float com_y;      // m
     float com_z;      // m, logged for DR even though V0 thrust model ignores it
@@ -450,6 +456,26 @@ static inline float thrust_to_rpm(const Params* p, float thrust) {
     return sqrtf(thrust / p->k_thrust);
 }
 
+static inline float normalized_thrust_command(const Params* p, float raw_action) {
+    float f_hat = 0.5f * (clampf(raw_action, -1.0f, 1.0f) + 1.0f);
+    float lo = clampf(p->normalized_thrust_min, 0.0f, 1.0f);
+    float hi = clampf(p->normalized_thrust_max, lo, 1.0f);
+    return clampf(f_hat, lo, hi);
+}
+
+static inline float action_to_target_thrust(const Params* p, float raw_action, float trim,
+                                            float max_thrust) {
+    if (p->action_mode == M4D_ACTION_NORMALIZED_THRUST) {
+        return normalized_thrust_command(p, raw_action) * max_thrust;
+    }
+
+    float action = clampf(raw_action * p->action_scale, -1.0f, 1.0f);
+    float target_thrust = action >= 0.0f
+        ? trim + action * (max_thrust - trim)
+        : trim + action * trim;
+    return target_thrust;
+}
+
 static inline void init_drone(Drone* drone, unsigned int* rng, const DomainRandomization* dr) {
     float mass_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->mass));
     float ixx_mult = dr_sample_mult(rng, dr_param_range(dr, dr == NULL ? 0.0f : dr->inertia));
@@ -483,6 +509,9 @@ static inline void init_drone(Drone* drone, unsigned int* rng, const DomainRando
 
     drone->params.k_mot = BASE_K_MOT * motor_lag_mult;
     drone->params.action_scale = 1.0f;
+    drone->params.action_mode = M4D_ACTION_HOVER_TRIM;
+    drone->params.normalized_thrust_min = 0.0f;
+    drone->params.normalized_thrust_max = 1.0f;
     drone->params.com_x = com_x;
     drone->params.com_y = com_y;
     drone->params.com_z = com_z;
@@ -533,13 +562,18 @@ static inline void compute_derivatives(State* state, Params* params, float* acti
     hover_trim_thrusts(params, trim);
     float max_thrust = max_motor_thrust(params);
     float target_rpms[4];
-    bool hover_equilibrium = true;
+    bool hover_equilibrium = params->action_mode == M4D_ACTION_HOVER_TRIM;
     for (int i = 0; i < 4; i++) {
-        float action = clampf(actions[i] * params->action_scale, -1.0f, 1.0f);
-        if (fabsf(action) > 1e-8f) hover_equilibrium = false;
-        float target_thrust = action >= 0.0f
-            ? trim[i] + action * (max_thrust - trim[i])
-            : trim[i] + action * trim[i];
+        float target_thrust;
+        if (params->action_mode == M4D_ACTION_NORMALIZED_THRUST) {
+            target_thrust = action_to_target_thrust(params, actions[i], trim[i], max_thrust);
+        } else {
+            float action = clampf(actions[i] * params->action_scale, -1.0f, 1.0f);
+            if (fabsf(action) > 1e-8f) hover_equilibrium = false;
+            target_thrust = action >= 0.0f
+                ? trim[i] + action * (max_thrust - trim[i])
+                : trim[i] + action * trim[i];
+        }
         target_rpms[i] = thrust_to_rpm(params, target_thrust);
     }
 

@@ -24,6 +24,11 @@ spin directions are out of scope for V0.
 - Action `0` maps to hover trim from the CAD allocation matrix.
 - `env.action_scale` scales policy actions around hover trim. `1.0` preserves
   the full baseline range; `0.2` or `0.3` is intended for easy curriculum runs.
+- `env.action_mode = 0` is the legacy hover-trim action interface used by the
+  current V0 policies. `env.action_mode = 1` enables the experimental
+  sim-to-real normalized thrust interface, where each action maps to
+  `f_hat = 0.5 * (clip(a, -1, 1) + 1)` and then to motor thrust with optional
+  `env.normalized_thrust_min/max` caps.
 - `env.domain_randomization` enables per-reset physics randomization. V0.11
   adds granular `env.dr_*` controls and keeps all DR defaults at `0.0`.
 - Observations remain the PufferLib 23-float drone observation vector, with

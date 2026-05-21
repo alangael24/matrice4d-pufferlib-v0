@@ -59,11 +59,16 @@ typedef __nv_bfloat16 precision_t;
 #define BASE_YAW_SIGN_RL -1.0f
 #define BASE_YAW_SIGN_RR  1.0f
 
+#define M4D_ACTION_HOVER_TRIM 0
+#define M4D_ACTION_NORMALIZED_THRUST 1
+
 struct DroneCudaParams {
     float mass, ixx, iyy, izz;
     float motor_x[4], motor_y[4], yaw_sign[4];
     float k_thrust, k_ang_damp, k_drag, b_drag, gravity;
     float max_rpm, max_vel, max_omega, k_mot, action_scale;
+    int action_mode;
+    float normalized_thrust_min, normalized_thrust_max;
     float com_x, com_y, com_z;
     float mass_mult, ixx_mult, iyy_mult, izz_mult;
     float k_thrust_mult, linear_drag_mult, yaw_drag_mult, motor_lag_mult;
@@ -213,6 +218,8 @@ struct DroneCudaCtx {
     float dr_mass, dr_inertia, dr_k_thrust, dr_linear_drag, dr_yaw_drag, dr_motor_lag;
     float dr_com_xy, dr_com_z;
     float action_scale;
+    int action_mode;
+    float normalized_thrust_min, normalized_thrust_max;
     float reset_pos_scale, reset_yaw_range, reset_vel_max;
     float sensor_noise;
 
@@ -410,6 +417,14 @@ __device__ __forceinline__ float thrust_to_rpm_dev(const DroneCudaParams* p, flo
     return sqrtf(thrust / p->k_thrust);
 }
 
+__device__ __forceinline__ float normalized_thrust_command_dev(const DroneCudaParams* p,
+                                                               float raw_action) {
+    float f_hat = 0.5f * (clampf_dev(raw_action, -1.0f, 1.0f) + 1.0f);
+    float lo = clampf_dev(p->normalized_thrust_min, 0.0f, 1.0f);
+    float hi = clampf_dev(p->normalized_thrust_max, lo, 1.0f);
+    return clampf_dev(f_hat, lo, hi);
+}
+
 __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
                                 curandStatePhilox4_32_10_t* rng) {
     float mass_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_mass));
@@ -441,6 +456,9 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
     p->max_omega = BASE_MAX_OMEGA;
     p->k_mot = BASE_K_MOT * motor_lag_mult;
     p->action_scale = cfg.action_scale;
+    p->action_mode = cfg.action_mode;
+    p->normalized_thrust_min = cfg.normalized_thrust_min;
+    p->normalized_thrust_max = cfg.normalized_thrust_max;
     p->com_x = com_x;
     p->com_y = com_y;
     p->com_z = com_z;
@@ -473,14 +491,19 @@ __device__ void compute_derivatives_dev(const DroneCudaState* s, const DroneCuda
     hover_trim_thrusts_dev(p, trim);
     float max_thrust = max_motor_thrust_dev(p);
     float target_rpms[4];
-    bool hover_equilibrium = true;
+    bool hover_equilibrium = p->action_mode == M4D_ACTION_HOVER_TRIM;
     #pragma unroll
     for (int i = 0; i < 4; i++) {
-        float action = clampf_dev(actions[i] * p->action_scale, -1.0f, 1.0f);
-        if (fabsf(action) > 1e-8f) hover_equilibrium = false;
-        float target_thrust = action >= 0.0f
-            ? trim[i] + action * (max_thrust - trim[i])
-            : trim[i] + action * trim[i];
+        float target_thrust;
+        if (p->action_mode == M4D_ACTION_NORMALIZED_THRUST) {
+            target_thrust = normalized_thrust_command_dev(p, actions[i]) * max_thrust;
+        } else {
+            float action = clampf_dev(actions[i] * p->action_scale, -1.0f, 1.0f);
+            if (fabsf(action) > 1e-8f) hover_equilibrium = false;
+            target_thrust = action >= 0.0f
+                ? trim[i] + action * (max_thrust - trim[i])
+                : trim[i] + action * trim[i];
+        }
         target_rpms[i] = thrust_to_rpm_dev(p, target_thrust);
         d->rpm_dot[i] = (1.0f / p->k_mot) * (target_rpms[i] - s->rpms[i]);
         if (fabsf(target_rpms[i] - s->rpms[i]) > 1e-3f) hover_equilibrium = false;
@@ -739,9 +762,17 @@ __device__ void record_step_metrics_dev(DroneCudaState* s, const DroneCudaParams
         if (abs_action >= 0.99f) action_saturation_count += 1.0f;
         float env_clipped = clampf_dev(raw_actions[i], -1.0f, 1.0f);
         action_clipped_abs_sum += fabsf(env_clipped);
-        float motor_action = clampf_dev(env_clipped * p->action_scale, -1.0f, 1.0f);
-        if (motor_action <= -0.99f) motor_clip_low_count += 1.0f;
-        if (motor_action >= 0.99f) motor_clip_high_count += 1.0f;
+        if (p->action_mode == M4D_ACTION_NORMALIZED_THRUST) {
+            float motor_cmd = normalized_thrust_command_dev(p, env_clipped);
+            float lo = clampf_dev(p->normalized_thrust_min, 0.0f, 1.0f);
+            float hi = clampf_dev(p->normalized_thrust_max, lo, 1.0f);
+            if (motor_cmd <= lo + 1e-5f) motor_clip_low_count += 1.0f;
+            if (motor_cmd >= hi - 1e-5f) motor_clip_high_count += 1.0f;
+        } else {
+            float motor_action = clampf_dev(env_clipped * p->action_scale, -1.0f, 1.0f);
+            if (motor_action <= -0.99f) motor_clip_low_count += 1.0f;
+            if (motor_action >= 0.99f) motor_clip_high_count += 1.0f;
+        }
         s->rpm_sum[i] += s->rpms[i];
     }
     s->action_abs_sum += action_abs_sum / 4.0f;
@@ -955,6 +986,9 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.dr_com_xy = dict_float(env_kwargs, "dr_com_xy", 0.0f);
     ctx.dr_com_z = dict_float(env_kwargs, "dr_com_z", 0.0f);
     ctx.action_scale = dict_float(env_kwargs, "action_scale", 1.0f);
+    ctx.action_mode = (int)dict_float(env_kwargs, "action_mode", (float)M4D_ACTION_HOVER_TRIM);
+    ctx.normalized_thrust_min = dict_float(env_kwargs, "normalized_thrust_min", 0.0f);
+    ctx.normalized_thrust_max = dict_float(env_kwargs, "normalized_thrust_max", 1.0f);
     ctx.reset_pos_scale = dict_float(env_kwargs, "reset_pos_scale", 1.0f);
     ctx.reset_yaw_range = dict_float(env_kwargs, "reset_yaw_range", DRONE_PI);
     ctx.reset_vel_max = dict_float(env_kwargs, "reset_vel_max", 0.0f);
