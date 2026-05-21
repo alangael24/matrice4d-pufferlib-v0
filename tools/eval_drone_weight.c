@@ -269,6 +269,41 @@ static void configure_dr_family_v05(DroneEnv* env, int num_agents) {
     env->sensor_noise = 0.0f;
 }
 
+static void configure_dr_family_v1a(DroneEnv* env, int num_agents) {
+    configure_common(env, num_agents);
+
+    env->domain_randomization = 1.0f;
+    env->dr_authority_gated = 1.0f;
+    env->dr_usable_t2w_min = 2.0f;
+    env->dr_usable_t2w_max = 4.2f;
+    env->dr_mass_min = 0.80f;
+    env->dr_mass_max = 1.25f;
+    env->dr_inertia_min = 0.60f;
+    env->dr_inertia_max = 1.60f;
+    env->dr_motor_thrust_min = 0.85f;
+    env->dr_motor_thrust_max = 1.15f;
+    env->dr_motor_tau_min = 0.06f;
+    env->dr_motor_tau_max = 0.24f;
+    env->dr_yaw_torque_min = 0.75f;
+    env->dr_yaw_torque_max = 1.30f;
+    env->dr_com_xy = 0.025f;
+    env->dr_com_z = 0.015f;
+    env->dr_linear_drag_min = 0.25f;
+    env->dr_linear_drag_max = 2.00f;
+    env->dr_angular_damping_min = 0.50f;
+    env->dr_angular_damping_max = 2.00f;
+
+    env->alpha_omega_z_mult = 5.0f;
+    env->action_scale = 1.0f;
+    env->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    env->normalized_thrust_min = 0.0f;
+    env->normalized_thrust_max = 0.85f;
+    env->reset_yaw_range = 3.14159f;
+    env->reset_vel_max = 0.2f;
+    env->action_latency = 0.0f;
+    env->sensor_noise = 0.0f;
+}
+
 static void configure_low_authority_holdout(DroneEnv* env, int num_agents) {
     configure_dr_family_v05(env, num_agents);
 
@@ -356,6 +391,9 @@ static void configure_env(DroneEnv* env, const char* config, int num_agents) {
     } else if (strcmp(config, "family_v05") == 0 ||
                strcmp(config, "family_v0.5_authority_gated") == 0) {
         configure_dr_family_v05(env, num_agents);
+    } else if (strcmp(config, "family_v1a") == 0 ||
+               strcmp(config, "family_v1a_authority_gated") == 0) {
+        configure_dr_family_v1a(env, num_agents);
     } else if (strcmp(config, "low_authority_holdout") == 0) {
         configure_low_authority_holdout(env, num_agents);
     } else if (strcmp(config, "motor_tau_high_holdout") == 0) {
@@ -372,7 +410,8 @@ static void configure_env(DroneEnv* env, const char* config, int num_agents) {
         fprintf(stderr,
                 "Unknown config '%s'; valid: baseline, nominal, light, narrow20, medium, "
                 "hard, family_v1, family_v1_holdout_raw, family_v05, "
-                "family_v0.5_authority_gated, low_authority_holdout, "
+                "family_v0.5_authority_gated, family_v1a, "
+                "family_v1a_authority_gated, low_authority_holdout, "
                 "motor_tau_high_holdout, mass_high_holdout, mixed_motors_mild, "
                 "3plus1_mismatch, capped_high_thrust\n",
                 config);
