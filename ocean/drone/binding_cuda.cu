@@ -62,6 +62,57 @@ typedef __nv_bfloat16 precision_t;
 #define M4D_ACTION_HOVER_TRIM 0
 #define M4D_ACTION_NORMALIZED_THRUST 1
 
+#define DRONE_ADR_MODE_AUTHORITY 1
+#define DRONE_ADR_MODE_LEGACY_PAPER 2
+
+#define DRONE_ADR_PARAM_COUNT 6
+#define DRONE_ADR_EDGE_COUNT (DRONE_ADR_PARAM_COUNT * 2)
+#define DRONE_ADR_LEGACY_PARAM_COUNT 8
+#define DRONE_ADR_LEGACY_EDGE_COUNT (DRONE_ADR_LEGACY_PARAM_COUNT * 2)
+#define DRONE_ADR_SIDE_LOW 0
+#define DRONE_ADR_SIDE_HIGH 1
+#define DRONE_ADR_USABLE_T2W 0
+#define DRONE_ADR_MASS 1
+#define DRONE_ADR_INERTIA 2
+#define DRONE_ADR_MOTOR_THRUST 3
+#define DRONE_ADR_MOTOR_TAU 4
+#define DRONE_ADR_COM_XY 5
+#define DRONE_ADR_LEGACY_MASS 0
+#define DRONE_ADR_LEGACY_INERTIA 1
+#define DRONE_ADR_LEGACY_K_THRUST 2
+#define DRONE_ADR_LEGACY_LINEAR_DRAG 3
+#define DRONE_ADR_LEGACY_YAW_DRAG 4
+#define DRONE_ADR_LEGACY_MOTOR_LAG 5
+#define DRONE_ADR_LEGACY_COM_XY 6
+#define DRONE_ADR_LEGACY_COM_Z 7
+
+struct DroneCudaAdrState {
+    int enabled;
+    int mode;
+    float usable_t2w_min, usable_t2w_max;
+    float mass_min, mass_max;
+    float inertia_min, inertia_max;
+    float motor_thrust_min, motor_thrust_max;
+    float motor_tau_min, motor_tau_max;
+    float com_xy;
+    float legacy_mass_min, legacy_mass_max;
+    float legacy_inertia_min, legacy_inertia_max;
+    float legacy_k_thrust_min, legacy_k_thrust_max;
+    float legacy_linear_drag_min, legacy_linear_drag_max;
+    float legacy_yaw_drag_min, legacy_yaw_drag_max;
+    float legacy_motor_lag_min, legacy_motor_lag_max;
+    float legacy_com_xy;
+    float legacy_com_z;
+    unsigned int counts[DRONE_ADR_EDGE_COUNT];
+    unsigned int successes[DRONE_ADR_EDGE_COUNT];
+    unsigned int updates[DRONE_ADR_EDGE_COUNT];
+    unsigned int updating[DRONE_ADR_EDGE_COUNT];
+    unsigned int legacy_counts[DRONE_ADR_LEGACY_EDGE_COUNT];
+    float legacy_perf_sum[DRONE_ADR_LEGACY_EDGE_COUNT];
+    unsigned int legacy_updates[DRONE_ADR_LEGACY_EDGE_COUNT];
+    unsigned int legacy_updating[DRONE_ADR_LEGACY_EDGE_COUNT];
+};
+
 struct DroneCudaParams {
     float mass, ixx, iyy, izz;
     float motor_x[4], motor_y[4], yaw_sign[4];
@@ -122,6 +173,9 @@ struct DroneCudaState {
     int action_history_idx;
     float prev_action[4];
     int has_prev_action;
+    int pal_probe_active;
+    int adr_probe_param;
+    int adr_probe_side;
 };
 
 struct DroneCudaDerivative {
@@ -238,6 +292,22 @@ struct DroneCudaCtx {
     float dr_linear_drag_min, dr_linear_drag_max;
     float dr_angular_damping_min, dr_angular_damping_max;
     float dr_profile_mix;
+    float adr_enabled;
+    float adr_mode;
+    float adr_probe_prob;
+    float adr_success_threshold;
+    float adr_contract_threshold;
+    float adr_step;
+    float adr_eval_episodes;
+    float adr_init_usable_t2w_min, adr_init_usable_t2w_max;
+    float adr_init_mass_min, adr_init_mass_max;
+    float adr_init_inertia_min, adr_init_inertia_max;
+    float adr_init_motor_thrust_min, adr_init_motor_thrust_max;
+    float adr_init_motor_tau_min, adr_init_motor_tau_max;
+    float adr_init_com_xy;
+    float pal_probe_prob;
+    int pal_probe_steps;
+    float pal_probe_amp;
     float action_scale;
     int action_mode;
     float normalized_thrust_min, normalized_thrust_max;
@@ -248,6 +318,7 @@ struct DroneCudaCtx {
     DroneCudaParams* params;
     curandStatePhilox4_32_10_t* rng;
     DroneCudaLog* log;
+    DroneCudaAdrState* adr;
 };
 
 static inline float dict_float(Dict* dict, const char* key, float fallback) {
@@ -380,9 +451,15 @@ __device__ __forceinline__ bool dr_authority_gated_dev(const DroneCudaCtx& cfg) 
     return cfg.domain_randomization > 0.0f && cfg.dr_authority_gated > 0.0f;
 }
 
+__device__ __forceinline__ bool dr_structured_legacy_mix_dev(const DroneCudaCtx& cfg) {
+    return dr_authority_gated_dev(cfg) && cfg.dr_profile_mix >= 3.0f
+        && cfg.dr_profile_mix < 4.0f;
+}
+
 __device__ __forceinline__ float dr_sample_range_dev(curandStatePhilox4_32_10_t* rng,
                                                      float lo, float hi, float fallback) {
-    if (hi <= lo) return fallback;
+    if (hi < lo) return fallback;
+    if (hi == lo) return lo;
     return rndf_dev(lo, hi, rng);
 }
 
@@ -399,6 +476,364 @@ __device__ __forceinline__ int dr_risk_score_dev(float usable_t2w, float mass_mu
     if (motor_tau_max > 0.22f) risk++;
     if (com_offset_norm > 0.025f) risk++;
     return risk;
+}
+
+__device__ __forceinline__ bool adr_authority_active_dev(const DroneCudaCtx& cfg) {
+    return cfg.adr_enabled > 0.0f && cfg.adr != NULL
+        && cfg.adr->enabled != 0 && cfg.adr->mode == DRONE_ADR_MODE_AUTHORITY
+        && dr_authority_gated_dev(cfg);
+}
+
+__device__ __forceinline__ bool adr_legacy_paper_active_dev(const DroneCudaCtx& cfg) {
+    return cfg.adr_enabled > 0.0f && cfg.adr != NULL
+        && cfg.adr->enabled != 0 && cfg.adr->mode == DRONE_ADR_MODE_LEGACY_PAPER
+        && cfg.domain_randomization > 0.0f && !dr_authority_gated_dev(cfg);
+}
+
+__device__ __forceinline__ int adr_edge_idx_dev(int param, int side) {
+    return param * 2 + side;
+}
+
+__device__ __forceinline__ float adr_param_step_dev(const DroneCudaCtx& cfg, int param) {
+    float step = fmaxf(cfg.adr_step, 1e-5f);
+    if (param == DRONE_ADR_MOTOR_TAU) return step * 0.25f;
+    if (param == DRONE_ADR_COM_XY) return step * 0.25f;
+    return step;
+}
+
+__device__ void adr_adjust_edge_dev(DroneCudaAdrState* adr, const DroneCudaCtx& cfg,
+                                    int param, int side, bool success) {
+    float step = adr_param_step_dev(cfg, param);
+    if (param == DRONE_ADR_USABLE_T2W) {
+        float gap = 0.05f;
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->usable_t2w_min = success
+                ? fmaxf(cfg.dr_usable_t2w_min, adr->usable_t2w_min - step)
+                : fminf(adr->usable_t2w_max - gap, adr->usable_t2w_min + step);
+        } else {
+            adr->usable_t2w_max = success
+                ? fminf(cfg.dr_usable_t2w_max, adr->usable_t2w_max + step)
+                : fmaxf(adr->usable_t2w_min + gap, adr->usable_t2w_max - step);
+        }
+    } else if (param == DRONE_ADR_MASS) {
+        float gap = 0.01f;
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->mass_min = success
+                ? fmaxf(cfg.dr_mass_min, adr->mass_min - step)
+                : fminf(adr->mass_max - gap, adr->mass_min + step);
+        } else {
+            adr->mass_max = success
+                ? fminf(cfg.dr_mass_max, adr->mass_max + step)
+                : fmaxf(adr->mass_min + gap, adr->mass_max - step);
+        }
+    } else if (param == DRONE_ADR_INERTIA) {
+        float gap = 0.01f;
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->inertia_min = success
+                ? fmaxf(cfg.dr_inertia_min, adr->inertia_min - step)
+                : fminf(adr->inertia_max - gap, adr->inertia_min + step);
+        } else {
+            adr->inertia_max = success
+                ? fminf(cfg.dr_inertia_max, adr->inertia_max + step)
+                : fmaxf(adr->inertia_min + gap, adr->inertia_max - step);
+        }
+    } else if (param == DRONE_ADR_MOTOR_THRUST) {
+        float gap = 0.01f;
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->motor_thrust_min = success
+                ? fmaxf(cfg.dr_motor_thrust_min, adr->motor_thrust_min - step)
+                : fminf(adr->motor_thrust_max - gap, adr->motor_thrust_min + step);
+        } else {
+            adr->motor_thrust_max = success
+                ? fminf(cfg.dr_motor_thrust_max, adr->motor_thrust_max + step)
+                : fmaxf(adr->motor_thrust_min + gap, adr->motor_thrust_max - step);
+        }
+    } else if (param == DRONE_ADR_MOTOR_TAU) {
+        float gap = 0.002f;
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->motor_tau_min = success
+                ? fmaxf(cfg.dr_motor_tau_min, adr->motor_tau_min - step)
+                : fminf(adr->motor_tau_max - gap, adr->motor_tau_min + step);
+        } else {
+            adr->motor_tau_max = success
+                ? fminf(cfg.dr_motor_tau_max, adr->motor_tau_max + step)
+                : fmaxf(adr->motor_tau_min + gap, adr->motor_tau_max - step);
+        }
+    } else if (param == DRONE_ADR_COM_XY && side == DRONE_ADR_SIDE_HIGH) {
+        adr->com_xy = success
+            ? fminf(fabsf(cfg.dr_com_xy), adr->com_xy + step)
+            : fmaxf(0.0f, adr->com_xy - step);
+    }
+}
+
+__device__ void adr_apply_bounds_and_probe_dev(
+    DroneCudaState* s, const DroneCudaCtx& cfg, curandStatePhilox4_32_10_t* rng,
+    float* usable_t2w_min, float* usable_t2w_max,
+    float* mass_min, float* mass_max,
+    float* inertia_min, float* inertia_max,
+    float* motor_thrust_min, float* motor_thrust_max,
+    float* motor_tau_min, float* motor_tau_max,
+    float* com_xy_range) {
+    s->adr_probe_param = -1;
+    s->adr_probe_side = -1;
+    if (!adr_authority_active_dev(cfg)) return;
+
+    DroneCudaAdrState* adr = cfg.adr;
+    *usable_t2w_min = adr->usable_t2w_min;
+    *usable_t2w_max = adr->usable_t2w_max;
+    *mass_min = adr->mass_min;
+    *mass_max = adr->mass_max;
+    *inertia_min = adr->inertia_min;
+    *inertia_max = adr->inertia_max;
+    *motor_thrust_min = adr->motor_thrust_min;
+    *motor_thrust_max = adr->motor_thrust_max;
+    *motor_tau_min = adr->motor_tau_min;
+    *motor_tau_max = adr->motor_tau_max;
+    *com_xy_range = fminf(fabsf(cfg.dr_com_xy), adr->com_xy);
+
+    float probe_prob = clampf_dev(cfg.adr_probe_prob, 0.0f, 1.0f);
+    if (curand_uniform(rng) > probe_prob) return;
+
+    int param = (int)floorf(curand_uniform(rng) * (float)DRONE_ADR_PARAM_COUNT);
+    if (param >= DRONE_ADR_PARAM_COUNT) param = DRONE_ADR_PARAM_COUNT - 1;
+    int side = curand_uniform(rng) < 0.5f ? DRONE_ADR_SIDE_LOW : DRONE_ADR_SIDE_HIGH;
+    if (param == DRONE_ADR_COM_XY) side = DRONE_ADR_SIDE_HIGH;
+
+    s->adr_probe_param = param;
+    s->adr_probe_side = side;
+
+    if (param == DRONE_ADR_USABLE_T2W) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->usable_t2w_min : adr->usable_t2w_max;
+        *usable_t2w_min = v;
+        *usable_t2w_max = v;
+    } else if (param == DRONE_ADR_MASS) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->mass_min : adr->mass_max;
+        *mass_min = v;
+        *mass_max = v;
+    } else if (param == DRONE_ADR_INERTIA) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->inertia_min : adr->inertia_max;
+        *inertia_min = v;
+        *inertia_max = v;
+    } else if (param == DRONE_ADR_MOTOR_THRUST) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->motor_thrust_min : adr->motor_thrust_max;
+        *motor_thrust_min = v;
+        *motor_thrust_max = v;
+    } else if (param == DRONE_ADR_MOTOR_TAU) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->motor_tau_min : adr->motor_tau_max;
+        *motor_tau_min = v;
+        *motor_tau_max = v;
+    } else if (param == DRONE_ADR_COM_XY) {
+        *com_xy_range = adr->com_xy;
+    }
+}
+
+__device__ __forceinline__ float adr_legacy_param_step_dev(const DroneCudaCtx& cfg, int param) {
+    float step = fmaxf(cfg.adr_step, 1e-5f);
+    if (param == DRONE_ADR_LEGACY_COM_XY || param == DRONE_ADR_LEGACY_COM_Z) {
+        return step * 0.25f;
+    }
+    return step;
+}
+
+__device__ void adr_legacy_adjust_edge_dev(DroneCudaAdrState* adr, const DroneCudaCtx& cfg,
+                                           int param, int side, bool expand) {
+    float step = adr_legacy_param_step_dev(cfg, param);
+
+    if (param == DRONE_ADR_LEGACY_MASS) {
+        float hard_lo = fmaxf(0.01f, 1.0f - fabsf(cfg.dr_mass));
+        float hard_hi = 1.0f + fabsf(cfg.dr_mass);
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->legacy_mass_min = expand
+                ? fmaxf(hard_lo, adr->legacy_mass_min - step)
+                : fminf(adr->legacy_mass_max, adr->legacy_mass_min + step);
+        } else {
+            adr->legacy_mass_max = expand
+                ? fminf(hard_hi, adr->legacy_mass_max + step)
+                : fmaxf(adr->legacy_mass_min, adr->legacy_mass_max - step);
+        }
+    } else if (param == DRONE_ADR_LEGACY_INERTIA) {
+        float hard_lo = fmaxf(0.01f, 1.0f - fabsf(cfg.dr_inertia));
+        float hard_hi = 1.0f + fabsf(cfg.dr_inertia);
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->legacy_inertia_min = expand
+                ? fmaxf(hard_lo, adr->legacy_inertia_min - step)
+                : fminf(adr->legacy_inertia_max, adr->legacy_inertia_min + step);
+        } else {
+            adr->legacy_inertia_max = expand
+                ? fminf(hard_hi, adr->legacy_inertia_max + step)
+                : fmaxf(adr->legacy_inertia_min, adr->legacy_inertia_max - step);
+        }
+    } else if (param == DRONE_ADR_LEGACY_K_THRUST) {
+        float hard_lo = fmaxf(0.01f, 1.0f - fabsf(cfg.dr_k_thrust));
+        float hard_hi = 1.0f + fabsf(cfg.dr_k_thrust);
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->legacy_k_thrust_min = expand
+                ? fmaxf(hard_lo, adr->legacy_k_thrust_min - step)
+                : fminf(adr->legacy_k_thrust_max, adr->legacy_k_thrust_min + step);
+        } else {
+            adr->legacy_k_thrust_max = expand
+                ? fminf(hard_hi, adr->legacy_k_thrust_max + step)
+                : fmaxf(adr->legacy_k_thrust_min, adr->legacy_k_thrust_max - step);
+        }
+    } else if (param == DRONE_ADR_LEGACY_LINEAR_DRAG) {
+        float hard_lo = fmaxf(0.01f, 1.0f - fabsf(cfg.dr_linear_drag));
+        float hard_hi = 1.0f + fabsf(cfg.dr_linear_drag);
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->legacy_linear_drag_min = expand
+                ? fmaxf(hard_lo, adr->legacy_linear_drag_min - step)
+                : fminf(adr->legacy_linear_drag_max, adr->legacy_linear_drag_min + step);
+        } else {
+            adr->legacy_linear_drag_max = expand
+                ? fminf(hard_hi, adr->legacy_linear_drag_max + step)
+                : fmaxf(adr->legacy_linear_drag_min, adr->legacy_linear_drag_max - step);
+        }
+    } else if (param == DRONE_ADR_LEGACY_YAW_DRAG) {
+        float hard_lo = fmaxf(0.01f, 1.0f - fabsf(cfg.dr_yaw_drag));
+        float hard_hi = 1.0f + fabsf(cfg.dr_yaw_drag);
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->legacy_yaw_drag_min = expand
+                ? fmaxf(hard_lo, adr->legacy_yaw_drag_min - step)
+                : fminf(adr->legacy_yaw_drag_max, adr->legacy_yaw_drag_min + step);
+        } else {
+            adr->legacy_yaw_drag_max = expand
+                ? fminf(hard_hi, adr->legacy_yaw_drag_max + step)
+                : fmaxf(adr->legacy_yaw_drag_min, adr->legacy_yaw_drag_max - step);
+        }
+    } else if (param == DRONE_ADR_LEGACY_MOTOR_LAG) {
+        float hard_lo = fmaxf(0.01f, 1.0f - fabsf(cfg.dr_motor_lag));
+        float hard_hi = 1.0f + fabsf(cfg.dr_motor_lag);
+        if (side == DRONE_ADR_SIDE_LOW) {
+            adr->legacy_motor_lag_min = expand
+                ? fmaxf(hard_lo, adr->legacy_motor_lag_min - step)
+                : fminf(adr->legacy_motor_lag_max, adr->legacy_motor_lag_min + step);
+        } else {
+            adr->legacy_motor_lag_max = expand
+                ? fminf(hard_hi, adr->legacy_motor_lag_max + step)
+                : fmaxf(adr->legacy_motor_lag_min, adr->legacy_motor_lag_max - step);
+        }
+    } else if (param == DRONE_ADR_LEGACY_COM_XY && side == DRONE_ADR_SIDE_HIGH) {
+        adr->legacy_com_xy = expand
+            ? fminf(fabsf(cfg.dr_com_xy), adr->legacy_com_xy + step)
+            : fmaxf(0.0f, adr->legacy_com_xy - step);
+    } else if (param == DRONE_ADR_LEGACY_COM_Z && side == DRONE_ADR_SIDE_HIGH) {
+        adr->legacy_com_z = expand
+            ? fminf(fabsf(cfg.dr_com_z), adr->legacy_com_z + step)
+            : fmaxf(0.0f, adr->legacy_com_z - step);
+    }
+}
+
+__device__ void adr_legacy_apply_bounds_and_probe_dev(
+    DroneCudaState* s, const DroneCudaCtx& cfg, curandStatePhilox4_32_10_t* rng,
+    float* mass_min, float* mass_max,
+    float* inertia_min, float* inertia_max,
+    float* k_thrust_min, float* k_thrust_max,
+    float* linear_drag_min, float* linear_drag_max,
+    float* yaw_drag_min, float* yaw_drag_max,
+    float* motor_lag_min, float* motor_lag_max,
+    float* com_xy_range, float* com_z_range) {
+    if (!adr_legacy_paper_active_dev(cfg)) return;
+
+    DroneCudaAdrState* adr = cfg.adr;
+    *mass_min = adr->legacy_mass_min;
+    *mass_max = adr->legacy_mass_max;
+    *inertia_min = adr->legacy_inertia_min;
+    *inertia_max = adr->legacy_inertia_max;
+    *k_thrust_min = adr->legacy_k_thrust_min;
+    *k_thrust_max = adr->legacy_k_thrust_max;
+    *linear_drag_min = adr->legacy_linear_drag_min;
+    *linear_drag_max = adr->legacy_linear_drag_max;
+    *yaw_drag_min = adr->legacy_yaw_drag_min;
+    *yaw_drag_max = adr->legacy_yaw_drag_max;
+    *motor_lag_min = adr->legacy_motor_lag_min;
+    *motor_lag_max = adr->legacy_motor_lag_max;
+    *com_xy_range = fminf(fabsf(cfg.dr_com_xy), adr->legacy_com_xy);
+    *com_z_range = fminf(fabsf(cfg.dr_com_z), adr->legacy_com_z);
+
+    float probe_prob = clampf_dev(cfg.adr_probe_prob, 0.0f, 1.0f);
+    if (curand_uniform(rng) > probe_prob) return;
+
+    int param = (int)floorf(curand_uniform(rng) * (float)DRONE_ADR_LEGACY_PARAM_COUNT);
+    if (param >= DRONE_ADR_LEGACY_PARAM_COUNT) param = DRONE_ADR_LEGACY_PARAM_COUNT - 1;
+    int side = curand_uniform(rng) < 0.5f ? DRONE_ADR_SIDE_LOW : DRONE_ADR_SIDE_HIGH;
+    if (param == DRONE_ADR_LEGACY_COM_XY || param == DRONE_ADR_LEGACY_COM_Z) {
+        side = DRONE_ADR_SIDE_HIGH;
+    }
+
+    s->adr_probe_param = param;
+    s->adr_probe_side = side;
+
+    if (param == DRONE_ADR_LEGACY_MASS) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->legacy_mass_min : adr->legacy_mass_max;
+        *mass_min = v; *mass_max = v;
+    } else if (param == DRONE_ADR_LEGACY_INERTIA) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->legacy_inertia_min : adr->legacy_inertia_max;
+        *inertia_min = v; *inertia_max = v;
+    } else if (param == DRONE_ADR_LEGACY_K_THRUST) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->legacy_k_thrust_min : adr->legacy_k_thrust_max;
+        *k_thrust_min = v; *k_thrust_max = v;
+    } else if (param == DRONE_ADR_LEGACY_LINEAR_DRAG) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->legacy_linear_drag_min : adr->legacy_linear_drag_max;
+        *linear_drag_min = v; *linear_drag_max = v;
+    } else if (param == DRONE_ADR_LEGACY_YAW_DRAG) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->legacy_yaw_drag_min : adr->legacy_yaw_drag_max;
+        *yaw_drag_min = v; *yaw_drag_max = v;
+    } else if (param == DRONE_ADR_LEGACY_MOTOR_LAG) {
+        float v = side == DRONE_ADR_SIDE_LOW ? adr->legacy_motor_lag_min : adr->legacy_motor_lag_max;
+        *motor_lag_min = v; *motor_lag_max = v;
+    } else if (param == DRONE_ADR_LEGACY_COM_XY) {
+        *com_xy_range = adr->legacy_com_xy;
+    } else if (param == DRONE_ADR_LEGACY_COM_Z) {
+        *com_z_range = adr->legacy_com_z;
+    }
+}
+
+__device__ void adr_record_done_dev(const DroneCudaCtx& cfg, const DroneCudaState* s,
+                                    bool timeout) {
+    DroneCudaAdrState* adr = cfg.adr;
+    if (adr == NULL || s->adr_probe_param < 0 || s->adr_probe_side < 0) return;
+
+    if (adr_authority_active_dev(cfg)) {
+        int idx = adr_edge_idx_dev(s->adr_probe_param, s->adr_probe_side);
+        if (idx < 0 || idx >= DRONE_ADR_EDGE_COUNT) return;
+
+        if (timeout) atomicAdd(&adr->successes[idx], 1u);
+        unsigned int count = atomicAdd(&adr->counts[idx], 1u) + 1u;
+        unsigned int target = (unsigned int)fmaxf(cfg.adr_eval_episodes, 1.0f);
+        if (count < target) return;
+        if (atomicCAS(&adr->updating[idx], 0u, 1u) != 0u) return;
+
+        unsigned int total = adr->counts[idx];
+        unsigned int good = adr->successes[idx];
+        float rate = total > 0u ? ((float)good / (float)total) : 0.0f;
+        bool success = rate >= cfg.adr_success_threshold;
+        adr_adjust_edge_dev(adr, cfg, s->adr_probe_param, s->adr_probe_side, success);
+        adr->counts[idx] = 0u;
+        adr->successes[idx] = 0u;
+        atomicAdd(&adr->updates[idx], 1u);
+        adr->updating[idx] = 0u;
+    } else if (adr_legacy_paper_active_dev(cfg)) {
+        int idx = adr_edge_idx_dev(s->adr_probe_param, s->adr_probe_side);
+        if (idx < 0 || idx >= DRONE_ADR_LEGACY_EDGE_COUNT) return;
+
+        float perf = timeout ? 1.0f : 0.0f;
+        atomicAdd(&adr->legacy_perf_sum[idx], perf);
+        unsigned int count = atomicAdd(&adr->legacy_counts[idx], 1u) + 1u;
+        unsigned int target = (unsigned int)fmaxf(cfg.adr_eval_episodes, 1.0f);
+        if (count < target) return;
+        if (atomicCAS(&adr->legacy_updating[idx], 0u, 1u) != 0u) return;
+
+        unsigned int total = adr->legacy_counts[idx];
+        float avg = total > 0u ? (adr->legacy_perf_sum[idx] / (float)total) : 0.0f;
+        if (avg >= cfg.adr_success_threshold) {
+            adr_legacy_adjust_edge_dev(adr, cfg, s->adr_probe_param, s->adr_probe_side, true);
+        } else if (avg <= cfg.adr_contract_threshold) {
+            adr_legacy_adjust_edge_dev(adr, cfg, s->adr_probe_param, s->adr_probe_side, false);
+        }
+        adr->legacy_counts[idx] = 0u;
+        adr->legacy_perf_sum[idx] = 0.0f;
+        atomicAdd(&adr->legacy_updates[idx], 1u);
+        adr->legacy_updating[idx] = 0u;
+    }
 }
 
 __device__ __forceinline__ float motor_thrust_coeff_dev(const DroneCudaParams* p, int i) {
@@ -491,8 +926,10 @@ __device__ __forceinline__ float normalized_thrust_command_dev(const DroneCudaPa
     return clampf_dev(f_hat, lo, hi);
 }
 
-__device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
+__device__ void init_params_dev(DroneCudaParams* p, DroneCudaState* s, const DroneCudaCtx& cfg,
                                 curandStatePhilox4_32_10_t* rng) {
+    s->adr_probe_param = -1;
+    s->adr_probe_side = -1;
     bool authority_gated = dr_authority_gated_dev(cfg);
     float usable_t2w_min = cfg.dr_usable_t2w_min;
     float usable_t2w_max = cfg.dr_usable_t2w_max;
@@ -512,9 +949,138 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
     float angular_damping_max = cfg.dr_angular_damping_max;
     float com_xy_range = cfg.domain_randomization > 0.0f ? fabsf(cfg.dr_com_xy) : 0.0f;
     float com_z_range = cfg.domain_randomization > 0.0f ? fabsf(cfg.dr_com_z) : 0.0f;
+    float normalized_thrust_max = cfg.normalized_thrust_max;
+    bool direct_k_thrust_profile = false;
+    float direct_k_thrust_min = 1.0f;
+    float direct_k_thrust_max = 1.0f;
     int risk_limit = 100;
+    bool force_three_plus_one = false;
+    bool force_fast_slow_mismatch = false;
 
-    if (authority_gated && cfg.dr_profile_mix > 0.0f) {
+    if (dr_structured_legacy_mix_dev(cfg)) {
+        float profile = rndf_dev(0.0f, 1.0f, rng);
+        if (profile < 0.35f) {
+            float hard = rndf_dev(0.0f, 1.0f, rng);
+            if (hard < 0.65f) {
+                usable_t2w_min = 2.35f; usable_t2w_max = 3.80f;
+                mass_min = 0.90f; mass_max = 1.15f;
+                inertia_min = 0.75f; inertia_max = 1.40f;
+                motor_thrust_min = 0.92f; motor_thrust_max = 1.08f;
+                motor_tau_min = 0.08f; motor_tau_max = 0.18f;
+                yaw_torque_min = 0.80f; yaw_torque_max = 1.20f;
+                linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+                angular_damping_min = 0.70f; angular_damping_max = 1.50f;
+                com_xy_range = 0.018f; com_z_range = 0.010f;
+                risk_limit = 2;
+            } else {
+                usable_t2w_min = 2.10f; usable_t2w_max = 4.00f;
+                mass_min = 0.82f; mass_max = 1.22f;
+                inertia_min = 0.60f; inertia_max = 1.55f;
+                motor_thrust_min = 0.88f; motor_thrust_max = 1.12f;
+                motor_tau_min = 0.08f; motor_tau_max = 0.24f;
+                yaw_torque_min = 0.75f; yaw_torque_max = 1.30f;
+                linear_drag_min = 0.30f; linear_drag_max = 1.90f;
+                angular_damping_min = 0.50f; angular_damping_max = 2.00f;
+                com_xy_range = 0.025f; com_z_range = 0.015f;
+                risk_limit = 3;
+            }
+        } else if (profile < 0.55f) {
+            usable_t2w_min = 2.00f; usable_t2w_max = 2.30f;
+            mass_min = 1.12f; mass_max = 1.25f;
+            inertia_min = 1.35f; inertia_max = 1.65f;
+            motor_thrust_min = 0.84f; motor_thrust_max = 1.05f;
+            motor_tau_min = 0.18f; motor_tau_max = 0.28f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.30f;
+            linear_drag_min = 1.20f; linear_drag_max = 2.00f;
+            angular_damping_min = 1.20f; angular_damping_max = 2.00f;
+            com_xy_range = 0.030f; com_z_range = 0.018f;
+            risk_limit = 4;
+        } else if (profile < 0.70f) {
+            usable_t2w_min = 2.60f; usable_t2w_max = 4.20f;
+            mass_min = 0.75f; mass_max = 0.95f;
+            inertia_min = 0.45f; inertia_max = 0.85f;
+            motor_thrust_min = 0.88f; motor_thrust_max = 1.12f;
+            motor_tau_min = 0.05f; motor_tau_max = 0.24f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.30f;
+            linear_drag_min = 0.25f; linear_drag_max = 1.20f;
+            angular_damping_min = 0.50f; angular_damping_max = 1.50f;
+            com_xy_range = 0.018f; com_z_range = 0.010f;
+            risk_limit = 3;
+            force_fast_slow_mismatch = true;
+        } else if (profile < 0.90f) {
+            usable_t2w_min = 2.25f; usable_t2w_max = 4.00f;
+            mass_min = 0.85f; mass_max = 1.20f;
+            inertia_min = 0.70f; inertia_max = 1.45f;
+            motor_thrust_min = 0.92f; motor_thrust_max = 1.08f;
+            motor_tau_min = 0.08f; motor_tau_max = 0.18f;
+            yaw_torque_min = 0.85f; yaw_torque_max = 1.15f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+            angular_damping_min = 0.70f; angular_damping_max = 1.70f;
+            com_xy_range = 0.022f; com_z_range = 0.012f;
+            risk_limit = 3;
+            force_three_plus_one = true;
+        } else {
+            usable_t2w_min = 2.20f; usable_t2w_max = 3.80f;
+            mass_min = 0.85f; mass_max = 1.15f;
+            inertia_min = 0.70f; inertia_max = 1.40f;
+            motor_thrust_min = 0.90f; motor_thrust_max = 1.10f;
+            motor_tau_min = 0.08f; motor_tau_max = 0.20f;
+            yaw_torque_min = 0.80f; yaw_torque_max = 1.25f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+            angular_damping_min = 0.50f; angular_damping_max = 1.50f;
+            com_xy_range = 0.015f; com_z_range = 0.010f;
+            risk_limit = 2;
+        }
+    } else if (authority_gated && cfg.dr_profile_mix >= 2.0f && cfg.dr_profile_mix < 3.0f) {
+        float profile = rndf_dev(0.0f, 1.0f, rng);
+        if (profile < 0.50f) {
+            usable_t2w_min = 2.00f; usable_t2w_max = 4.20f;
+            mass_min = 0.80f; mass_max = 1.25f;
+            inertia_min = 0.60f; inertia_max = 1.60f;
+            motor_thrust_min = 0.85f; motor_thrust_max = 1.15f;
+            motor_tau_min = 0.06f; motor_tau_max = 0.24f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.30f;
+            linear_drag_min = 0.25f; linear_drag_max = 2.00f;
+            angular_damping_min = 0.50f; angular_damping_max = 2.00f;
+            com_xy_range = 0.025f; com_z_range = 0.015f;
+            risk_limit = 3;
+        } else if (profile < 0.75f) {
+            normalized_thrust_max = rndf_dev(0.45f, 0.60f, rng);
+            mass_min = 0.95f; mass_max = 1.10f;
+            inertia_min = 0.90f; inertia_max = 1.30f;
+            motor_thrust_min = 0.95f; motor_thrust_max = 1.05f;
+            motor_tau_min = 0.08f; motor_tau_max = 0.18f;
+            yaw_torque_min = 0.85f; yaw_torque_max = 1.15f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.50f;
+            angular_damping_min = 0.50f; angular_damping_max = 1.50f;
+            com_xy_range = 0.012f; com_z_range = 0.008f;
+            direct_k_thrust_profile = true;
+            direct_k_thrust_min = 2.50f;
+            direct_k_thrust_max = 3.20f;
+        } else if (profile < 0.90f) {
+            usable_t2w_min = 2.20f; usable_t2w_max = 3.80f;
+            mass_min = 0.90f; mass_max = 1.20f;
+            inertia_min = 0.80f; inertia_max = 1.50f;
+            motor_thrust_min = 0.90f; motor_thrust_max = 1.10f;
+            motor_tau_min = 0.20f; motor_tau_max = 0.26f;
+            yaw_torque_min = 0.80f; yaw_torque_max = 1.25f;
+            linear_drag_min = 0.50f; linear_drag_max = 1.75f;
+            angular_damping_min = 0.50f; angular_damping_max = 2.00f;
+            com_xy_range = 0.018f; com_z_range = 0.010f;
+            risk_limit = 3;
+        } else {
+            usable_t2w_min = 2.40f; usable_t2w_max = 4.00f;
+            mass_min = 0.80f; mass_max = 1.20f;
+            inertia_min = 0.60f; inertia_max = 1.50f;
+            motor_thrust_min = 0.88f; motor_thrust_max = 1.15f;
+            motor_tau_min = 0.06f; motor_tau_max = 0.22f;
+            yaw_torque_min = 0.75f; yaw_torque_max = 1.30f;
+            linear_drag_min = 0.25f; linear_drag_max = 2.00f;
+            angular_damping_min = 0.50f; angular_damping_max = 2.00f;
+            com_xy_range = 0.022f; com_z_range = 0.012f;
+            risk_limit = 2;
+        }
+    } else if (authority_gated && cfg.dr_profile_mix > 0.0f) {
         float profile = rndf_dev(0.0f, 1.0f, rng);
         if (profile < 0.40f) {
             usable_t2w_min = 2.2f; usable_t2w_max = 3.8f;
@@ -566,6 +1132,11 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
         }
     }
 
+    adr_apply_bounds_and_probe_dev(
+        s, cfg, rng, &usable_t2w_min, &usable_t2w_max, &mass_min, &mass_max,
+        &inertia_min, &inertia_max, &motor_thrust_min, &motor_thrust_max,
+        &motor_tau_min, &motor_tau_max, &com_xy_range);
+
     float mass_mult = 1.0f;
     float ixx_mult = 1.0f;
     float iyy_mult = 1.0f;
@@ -614,6 +1185,38 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
                 motor_tau_sample_max = fmaxf(motor_tau_sample_max, motor_tau[i]);
             }
 
+            if (force_three_plus_one) {
+                int weak = (int)floorf(rndf_dev(0.0f, 4.0f, rng));
+                if (weak > 3) weak = 3;
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    motor_thrust_scale[i] = dr_sample_range_dev(rng, 0.96f, 1.06f, 1.0f);
+                    motor_tau[i] = dr_sample_range_dev(rng, 0.08f, 0.16f, BASE_K_MOT);
+                    yaw_torque_scale[i] = dr_sample_range_dev(rng, 0.90f, 1.10f, 1.0f);
+                }
+                motor_thrust_scale[weak] = dr_sample_range_dev(rng, 0.78f, 0.88f, 0.84f);
+                motor_tau[weak] = dr_sample_range_dev(rng, 0.22f, 0.28f, 0.24f);
+                yaw_torque_scale[weak] = dr_sample_range_dev(rng, 0.70f, 0.95f, 0.85f);
+            }
+
+            if (force_fast_slow_mismatch) {
+                int slow = (int)floorf(rndf_dev(0.0f, 4.0f, rng));
+                if (slow > 3) slow = 3;
+                int fast = (slow + 2) & 3;
+                motor_tau[slow] = dr_sample_range_dev(rng, 0.20f, 0.26f, 0.22f);
+                motor_tau[fast] = dr_sample_range_dev(rng, 0.05f, 0.09f, 0.07f);
+                motor_thrust_scale[slow] = dr_sample_range_dev(rng, 0.90f, 1.05f, 0.98f);
+                motor_thrust_scale[fast] = dr_sample_range_dev(rng, 0.95f, 1.12f, 1.02f);
+            }
+
+            motor_scale_min = 2.0f;
+            motor_tau_sample_max = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                motor_scale_min = fminf(motor_scale_min, motor_thrust_scale[i]);
+                motor_tau_sample_max = fmaxf(motor_tau_sample_max, motor_tau[i]);
+            }
+
             float inertia_sample_max = fmaxf(ixx_mult, fmaxf(iyy_mult, izz_mult));
             float com_norm = sqrtf(com_x * com_x + com_y * com_y + com_z * com_z);
             int risk = dr_risk_score_dev(
@@ -625,21 +1228,52 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
         float sum_motor_scale = 0.0f;
         #pragma unroll
         for (int i = 0; i < 4; i++) sum_motor_scale += motor_thrust_scale[i];
-        float cap = clampf_dev(cfg.normalized_thrust_max, 1e-3f, 1.0f);
-        float base_motor_max = BASE_K_THRUST * BASE_MAX_RPM * BASE_MAX_RPM;
-        k_thrust_mult = usable_t2w * (BASE_MASS * mass_mult * BASE_GRAVITY)
-            / fmaxf(cap * base_motor_max * sum_motor_scale, 1e-6f);
+        if (direct_k_thrust_profile) {
+            k_thrust_mult = dr_sample_range_dev(
+                rng, direct_k_thrust_min, direct_k_thrust_max, 2.91f);
+        } else {
+            float cap = clampf_dev(normalized_thrust_max, 1e-3f, 1.0f);
+            float base_motor_max = BASE_K_THRUST * BASE_MAX_RPM * BASE_MAX_RPM;
+            k_thrust_mult = usable_t2w * (BASE_MASS * mass_mult * BASE_GRAVITY)
+                / fmaxf(cap * base_motor_max * sum_motor_scale, 1e-6f);
+        }
         yaw_drag_mult = 1.0f;
         motor_lag_mult = 0.0f;
         #pragma unroll
         for (int i = 0; i < 4; i++) motor_lag_mult += motor_tau[i] / BASE_K_MOT;
         motor_lag_mult *= 0.25f;
     } else {
-        mass_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_mass));
-        ixx_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
-        iyy_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
-        izz_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_inertia));
-        linear_drag_mult = dr_sample_mult_dev(rng, dr_param_range_dev(cfg, cfg.dr_linear_drag));
+        float legacy_mass_min = 1.0f - dr_param_range_dev(cfg, cfg.dr_mass);
+        float legacy_mass_max = 1.0f + dr_param_range_dev(cfg, cfg.dr_mass);
+        float legacy_inertia_min = 1.0f - dr_param_range_dev(cfg, cfg.dr_inertia);
+        float legacy_inertia_max = 1.0f + dr_param_range_dev(cfg, cfg.dr_inertia);
+        float legacy_k_thrust_min = 1.0f - dr_param_range_dev(cfg, cfg.dr_k_thrust);
+        float legacy_k_thrust_max = 1.0f + dr_param_range_dev(cfg, cfg.dr_k_thrust);
+        float legacy_linear_drag_min = 1.0f - dr_param_range_dev(cfg, cfg.dr_linear_drag);
+        float legacy_linear_drag_max = 1.0f + dr_param_range_dev(cfg, cfg.dr_linear_drag);
+        float legacy_yaw_drag_min = 1.0f - dr_param_range_dev(cfg, cfg.dr_yaw_drag);
+        float legacy_yaw_drag_max = 1.0f + dr_param_range_dev(cfg, cfg.dr_yaw_drag);
+        float legacy_motor_lag_min = 1.0f - dr_param_range_dev(cfg, cfg.dr_motor_lag);
+        float legacy_motor_lag_max = 1.0f + dr_param_range_dev(cfg, cfg.dr_motor_lag);
+        adr_legacy_apply_bounds_and_probe_dev(
+            s, cfg, rng, &legacy_mass_min, &legacy_mass_max,
+            &legacy_inertia_min, &legacy_inertia_max,
+            &legacy_k_thrust_min, &legacy_k_thrust_max,
+            &legacy_linear_drag_min, &legacy_linear_drag_max,
+            &legacy_yaw_drag_min, &legacy_yaw_drag_max,
+            &legacy_motor_lag_min, &legacy_motor_lag_max,
+            &com_xy_range, &com_z_range);
+
+        mass_mult = dr_sample_range_dev(rng, legacy_mass_min, legacy_mass_max, 1.0f);
+        ixx_mult = dr_sample_range_dev(rng, legacy_inertia_min, legacy_inertia_max, 1.0f);
+        iyy_mult = dr_sample_range_dev(rng, legacy_inertia_min, legacy_inertia_max, 1.0f);
+        izz_mult = dr_sample_range_dev(rng, legacy_inertia_min, legacy_inertia_max, 1.0f);
+        k_thrust_mult = dr_sample_range_dev(rng, legacy_k_thrust_min, legacy_k_thrust_max, 1.0f);
+        linear_drag_mult = dr_sample_range_dev(rng, legacy_linear_drag_min, legacy_linear_drag_max, 1.0f);
+        yaw_drag_mult = dr_sample_range_dev(rng, legacy_yaw_drag_min, legacy_yaw_drag_max, 1.0f);
+        motor_lag_mult = dr_sample_range_dev(rng, legacy_motor_lag_min, legacy_motor_lag_max, 1.0f);
+        #pragma unroll
+        for (int i = 0; i < 4; i++) motor_tau[i] = BASE_K_MOT * motor_lag_mult;
         com_x = rndf_dev(-com_xy_range, com_xy_range, rng);
         com_y = rndf_dev(-com_xy_range, com_xy_range, rng);
         com_z = rndf_dev(-com_z_range, com_z_range, rng);
@@ -661,7 +1295,7 @@ __device__ void init_params_dev(DroneCudaParams* p, const DroneCudaCtx& cfg,
     p->action_scale = cfg.action_scale;
     p->action_mode = cfg.action_mode;
     p->normalized_thrust_min = cfg.normalized_thrust_min;
-    p->normalized_thrust_max = cfg.normalized_thrust_max;
+    p->normalized_thrust_max = clampf_dev(normalized_thrust_max, 0.0f, 1.0f);
     p->com_x = com_x;
     p->com_y = com_y;
     p->com_z = com_z;
@@ -874,7 +1508,7 @@ __device__ void reset_one_dev(DroneCudaState* s, DroneCudaParams* p, const Drone
                               curandStatePhilox4_32_10_t* rng) {
     DroneCudaState zero = {};
     *s = zero;
-    init_params_dev(p, cfg, rng);
+    init_params_dev(p, s, cfg, rng);
 
     float trim[4];
     hover_trim_thrusts_dev(p, trim);
@@ -905,8 +1539,33 @@ __device__ void reset_one_dev(DroneCudaState* s, DroneCudaParams* p, const Drone
         s->vel = scale3_dev(dir, speed);
     }
     set_target_hover_dev(s, cfg, rng);
+    s->pal_probe_active = curand_uniform(rng) <= clampf_dev(cfg.pal_probe_prob, 0.0f, 1.0f);
     s->prev_pos = s->pos;
     s->prev_potential = hover_potential_dev(s, cfg);
+}
+
+__device__ __forceinline__ void apply_pal_probe_dev(
+    const DroneCudaCtx& cfg, const DroneCudaState* s, float actions[4]) {
+    float amp = fabsf(cfg.pal_probe_amp);
+    if (!s->pal_probe_active || cfg.pal_probe_steps <= 0 || amp <= 0.0f) return;
+    if (s->episode_length < 0 || s->episode_length >= cfg.pal_probe_steps) return;
+
+    float pattern[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    switch (s->episode_length & 7) {
+        case 0: pattern[0] =  1.0f; pattern[1] =  1.0f; pattern[2] =  1.0f; pattern[3] =  1.0f; break;
+        case 1: pattern[0] = -1.0f; pattern[1] = -1.0f; pattern[2] = -1.0f; pattern[3] = -1.0f; break;
+        case 2: pattern[0] =  1.0f; pattern[1] = -1.0f; pattern[2] =  1.0f; pattern[3] = -1.0f; break;
+        case 3: pattern[0] = -1.0f; pattern[1] =  1.0f; pattern[2] = -1.0f; pattern[3] =  1.0f; break;
+        case 4: pattern[0] =  1.0f; pattern[1] =  1.0f; pattern[2] = -1.0f; pattern[3] = -1.0f; break;
+        case 5: pattern[0] = -1.0f; pattern[1] = -1.0f; pattern[2] =  1.0f; pattern[3] =  1.0f; break;
+        case 6: pattern[0] =  1.0f; pattern[1] = -1.0f; pattern[2] = -1.0f; pattern[3] =  1.0f; break;
+        default: pattern[0] = -1.0f; pattern[1] =  1.0f; pattern[2] =  1.0f; pattern[3] = -1.0f; break;
+    }
+
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        actions[k] = clampf_dev(actions[k] + amp * pattern[k], -1.0f, 1.0f);
+    }
 }
 
 __device__ void compute_obs_dev(const DroneCudaState* s, const DroneCudaParams* p,
@@ -1127,6 +1786,7 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
     for (int k = 0; k < 4; k++) {
         raw_actions[k] = actions[(size_t)i * DRONE_NUM_ATNS + k];
     }
+    apply_pal_probe_dev(cfg, &s, raw_actions);
 
     float action_delta_mean = 0.0f;
     if (s.has_prev_action) {
@@ -1196,6 +1856,7 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
 
     if (done) {
         log_done_dev(cfg.log, &s, &p, cfg, oob, timeout);
+        adr_record_done_dev(cfg, &s, timeout);
         reset_one_dev(&s, &p, cfg, &r);
     }
 
@@ -1255,6 +1916,27 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.dr_angular_damping_min = dict_float(env_kwargs, "dr_angular_damping_min", 1.0f);
     ctx.dr_angular_damping_max = dict_float(env_kwargs, "dr_angular_damping_max", 1.0f);
     ctx.dr_profile_mix = dict_float(env_kwargs, "dr_profile_mix", 0.0f);
+    ctx.adr_enabled = dict_float(env_kwargs, "adr_enabled", 0.0f);
+    ctx.adr_mode = dict_float(env_kwargs, "adr_mode", (float)DRONE_ADR_MODE_AUTHORITY);
+    ctx.adr_probe_prob = dict_float(env_kwargs, "adr_probe_prob", 0.02f);
+    ctx.adr_success_threshold = dict_float(env_kwargs, "adr_success_threshold", 0.90f);
+    ctx.adr_contract_threshold = dict_float(env_kwargs, "adr_contract_threshold", 0.50f);
+    ctx.adr_step = dict_float(env_kwargs, "adr_step", 0.02f);
+    ctx.adr_eval_episodes = dict_float(env_kwargs, "adr_eval_episodes", 64.0f);
+    ctx.adr_init_usable_t2w_min = dict_float(env_kwargs, "adr_init_usable_t2w_min", 2.40f);
+    ctx.adr_init_usable_t2w_max = dict_float(env_kwargs, "adr_init_usable_t2w_max", 3.40f);
+    ctx.adr_init_mass_min = dict_float(env_kwargs, "adr_init_mass_min", 0.90f);
+    ctx.adr_init_mass_max = dict_float(env_kwargs, "adr_init_mass_max", 1.10f);
+    ctx.adr_init_inertia_min = dict_float(env_kwargs, "adr_init_inertia_min", 0.80f);
+    ctx.adr_init_inertia_max = dict_float(env_kwargs, "adr_init_inertia_max", 1.30f);
+    ctx.adr_init_motor_thrust_min = dict_float(env_kwargs, "adr_init_motor_thrust_min", 0.92f);
+    ctx.adr_init_motor_thrust_max = dict_float(env_kwargs, "adr_init_motor_thrust_max", 1.08f);
+    ctx.adr_init_motor_tau_min = dict_float(env_kwargs, "adr_init_motor_tau_min", 0.08f);
+    ctx.adr_init_motor_tau_max = dict_float(env_kwargs, "adr_init_motor_tau_max", 0.18f);
+    ctx.adr_init_com_xy = dict_float(env_kwargs, "adr_init_com_xy", 0.012f);
+    ctx.pal_probe_prob = dict_float(env_kwargs, "pal_probe_prob", 0.0f);
+    ctx.pal_probe_steps = (int)dict_float(env_kwargs, "pal_probe_steps", 0.0f);
+    ctx.pal_probe_amp = dict_float(env_kwargs, "pal_probe_amp", 0.0f);
     ctx.action_scale = dict_float(env_kwargs, "action_scale", 1.0f);
     ctx.action_mode = (int)dict_float(env_kwargs, "action_mode", (float)M4D_ACTION_HOVER_TRIM);
     ctx.normalized_thrust_min = dict_float(env_kwargs, "normalized_thrust_min", 0.0f);
@@ -1266,6 +1948,77 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.action_latency_steps = latency_steps_from_seconds(dict_float(env_kwargs, "action_latency", 0.0f));
     (void)vec_kwargs;
     return ctx;
+}
+
+static float clamp_host(float v, float lo, float hi) {
+    if (hi < lo) {
+        float tmp = lo;
+        lo = hi;
+        hi = tmp;
+    }
+    return fminf(fmaxf(v, lo), hi);
+}
+
+static void adr_range_host(float hard_lo, float hard_hi, float init_lo, float init_hi,
+                           float fallback_lo, float fallback_hi, float gap,
+                           float* out_lo, float* out_hi) {
+    if (hard_hi <= hard_lo) {
+        hard_lo = fallback_lo;
+        hard_hi = fallback_hi;
+    }
+    init_lo = clamp_host(init_lo, hard_lo, hard_hi);
+    init_hi = clamp_host(init_hi, hard_lo, hard_hi);
+    if (init_hi < init_lo + gap) {
+        init_lo = clamp_host(fallback_lo, hard_lo, hard_hi);
+        init_hi = clamp_host(fallback_hi, hard_lo, hard_hi);
+    }
+    if (init_hi < init_lo + gap) {
+        init_lo = hard_lo;
+        init_hi = hard_hi;
+    }
+    *out_lo = init_lo;
+    *out_hi = init_hi;
+}
+
+static DroneCudaAdrState make_host_adr_state(const DroneCudaCtx* ctx) {
+    DroneCudaAdrState adr;
+    memset(&adr, 0, sizeof(adr));
+    adr.enabled = ctx->adr_enabled > 0.0f ? 1 : 0;
+    adr.mode = (int)ctx->adr_mode;
+    if (adr.mode != DRONE_ADR_MODE_LEGACY_PAPER) {
+        adr.mode = DRONE_ADR_MODE_AUTHORITY;
+    }
+    adr_range_host(ctx->dr_usable_t2w_min, ctx->dr_usable_t2w_max,
+                   ctx->adr_init_usable_t2w_min, ctx->adr_init_usable_t2w_max,
+                   2.40f, 3.40f, 0.05f, &adr.usable_t2w_min, &adr.usable_t2w_max);
+    adr_range_host(ctx->dr_mass_min, ctx->dr_mass_max,
+                   ctx->adr_init_mass_min, ctx->adr_init_mass_max,
+                   0.90f, 1.10f, 0.01f, &adr.mass_min, &adr.mass_max);
+    adr_range_host(ctx->dr_inertia_min, ctx->dr_inertia_max,
+                   ctx->adr_init_inertia_min, ctx->adr_init_inertia_max,
+                   0.80f, 1.30f, 0.01f, &adr.inertia_min, &adr.inertia_max);
+    adr_range_host(ctx->dr_motor_thrust_min, ctx->dr_motor_thrust_max,
+                   ctx->adr_init_motor_thrust_min, ctx->adr_init_motor_thrust_max,
+                   0.92f, 1.08f, 0.01f, &adr.motor_thrust_min, &adr.motor_thrust_max);
+    adr_range_host(ctx->dr_motor_tau_min, ctx->dr_motor_tau_max,
+                   ctx->adr_init_motor_tau_min, ctx->adr_init_motor_tau_max,
+                   0.08f, 0.18f, 0.002f, &adr.motor_tau_min, &adr.motor_tau_max);
+    adr.com_xy = clamp_host(ctx->adr_init_com_xy, 0.0f, fabsf(ctx->dr_com_xy));
+    adr.legacy_mass_min = 1.0f;
+    adr.legacy_mass_max = 1.0f;
+    adr.legacy_inertia_min = 1.0f;
+    adr.legacy_inertia_max = 1.0f;
+    adr.legacy_k_thrust_min = 1.0f;
+    adr.legacy_k_thrust_max = 1.0f;
+    adr.legacy_linear_drag_min = 1.0f;
+    adr.legacy_linear_drag_max = 1.0f;
+    adr.legacy_yaw_drag_min = 1.0f;
+    adr.legacy_yaw_drag_max = 1.0f;
+    adr.legacy_motor_lag_min = 1.0f;
+    adr.legacy_motor_lag_max = 1.0f;
+    adr.legacy_com_xy = 0.0f;
+    adr.legacy_com_z = 0.0f;
+    return adr;
 }
 
 extern "C" void cuda_env_init(StaticVec* vec, Dict* vec_kwargs, Dict* env_kwargs) {
@@ -1282,6 +2035,11 @@ extern "C" void cuda_env_init(StaticVec* vec, Dict* vec_kwargs, Dict* env_kwargs
                               (size_t)ctx->total_agents * sizeof(curandStatePhilox4_32_10_t)));
     CUDA_ENV_CHECK(cudaMalloc((void**)&ctx->log, sizeof(DroneCudaLog)));
     CUDA_ENV_CHECK(cudaMemset(ctx->log, 0, sizeof(DroneCudaLog)));
+    if (ctx->adr_enabled > 0.0f) {
+        DroneCudaAdrState host_adr = make_host_adr_state(ctx);
+        CUDA_ENV_CHECK(cudaMalloc((void**)&ctx->adr, sizeof(DroneCudaAdrState)));
+        CUDA_ENV_CHECK(cudaMemcpy(ctx->adr, &host_adr, sizeof(host_adr), cudaMemcpyHostToDevice));
+    }
 
     int block = 128;
     int grid = (ctx->total_agents + block - 1) / block;
@@ -1379,6 +2137,49 @@ extern "C" void cuda_env_log(StaticVec* vec, Dict* out) {
     dict_set(out, "com_x_mean", h.com_x_mean * inv);
     dict_set(out, "com_y_mean", h.com_y_mean * inv);
     dict_set(out, "com_z_mean", h.com_z_mean * inv);
+    if (ctx->adr != NULL) {
+        DroneCudaAdrState adr;
+        CUDA_ENV_CHECK(cudaMemcpy(&adr, ctx->adr, sizeof(adr), cudaMemcpyDeviceToHost));
+        unsigned int updates = 0u;
+        unsigned int pending = 0u;
+        for (int i = 0; i < DRONE_ADR_EDGE_COUNT; i++) {
+            updates += adr.updates[i];
+            pending += adr.counts[i];
+        }
+        for (int i = 0; i < DRONE_ADR_LEGACY_EDGE_COUNT; i++) {
+            updates += adr.legacy_updates[i];
+            pending += adr.legacy_counts[i];
+        }
+        dict_set(out, "adr_enabled", (float)adr.enabled);
+        dict_set(out, "adr_mode", (float)adr.mode);
+        dict_set(out, "adr_updates", (float)updates);
+        dict_set(out, "adr_pending_probes", (float)pending);
+        dict_set(out, "adr_usable_t2w_min", adr.usable_t2w_min);
+        dict_set(out, "adr_usable_t2w_max", adr.usable_t2w_max);
+        dict_set(out, "adr_mass_min", adr.mass_min);
+        dict_set(out, "adr_mass_max", adr.mass_max);
+        dict_set(out, "adr_inertia_min", adr.inertia_min);
+        dict_set(out, "adr_inertia_max", adr.inertia_max);
+        dict_set(out, "adr_motor_thrust_min", adr.motor_thrust_min);
+        dict_set(out, "adr_motor_thrust_max", adr.motor_thrust_max);
+        dict_set(out, "adr_motor_tau_min", adr.motor_tau_min);
+        dict_set(out, "adr_motor_tau_max", adr.motor_tau_max);
+        dict_set(out, "adr_com_xy", adr.com_xy);
+        dict_set(out, "adr_legacy_mass_min", adr.legacy_mass_min);
+        dict_set(out, "adr_legacy_mass_max", adr.legacy_mass_max);
+        dict_set(out, "adr_legacy_inertia_min", adr.legacy_inertia_min);
+        dict_set(out, "adr_legacy_inertia_max", adr.legacy_inertia_max);
+        dict_set(out, "adr_legacy_k_thrust_min", adr.legacy_k_thrust_min);
+        dict_set(out, "adr_legacy_k_thrust_max", adr.legacy_k_thrust_max);
+        dict_set(out, "adr_legacy_linear_drag_min", adr.legacy_linear_drag_min);
+        dict_set(out, "adr_legacy_linear_drag_max", adr.legacy_linear_drag_max);
+        dict_set(out, "adr_legacy_yaw_drag_min", adr.legacy_yaw_drag_min);
+        dict_set(out, "adr_legacy_yaw_drag_max", adr.legacy_yaw_drag_max);
+        dict_set(out, "adr_legacy_motor_lag_min", adr.legacy_motor_lag_min);
+        dict_set(out, "adr_legacy_motor_lag_max", adr.legacy_motor_lag_max);
+        dict_set(out, "adr_legacy_com_xy", adr.legacy_com_xy);
+        dict_set(out, "adr_legacy_com_z", adr.legacy_com_z);
+    }
     dict_set(out, "n", h.n);
     CUDA_ENV_CHECK(cudaMemset(ctx->log, 0, sizeof(DroneCudaLog)));
 }
@@ -1502,6 +2303,7 @@ extern "C" void cuda_env_close(StaticVec* vec) {
     CUDA_ENV_CHECK(cudaFree(ctx->params));
     CUDA_ENV_CHECK(cudaFree(ctx->rng));
     CUDA_ENV_CHECK(cudaFree(ctx->log));
+    if (ctx->adr != NULL) CUDA_ENV_CHECK(cudaFree(ctx->adr));
     free(ctx);
     vec->cuda_env = NULL;
 }

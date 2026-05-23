@@ -54,7 +54,7 @@ fi
 PLATFORM="$(uname -s)"
 if [ "$PLATFORM" = "Linux" ]; then
     RAYLIB_NAME='raylib-5.5_linux_amd64'
-    OMP_LIB=-lomp5
+    OMP_LIB=-lgomp
     SANITIZE_FLAGS=(-fsanitize=address,undefined,bounds,pointer-overflow,leak -fno-omit-frame-pointer)
     STANDALONE_LDFLAGS=(-lGL)
     SHARED_LDFLAGS=(-Bsymbolic-functions)
@@ -66,15 +66,24 @@ else
     SHARED_LDFLAGS=(-framework Cocoa -framework OpenGL -framework IOKit -undefined dynamic_lookup)
 fi
 
-CLANG_WARN=(
-    -Wall
-    -ferror-limit=3
-    -Werror=incompatible-pointer-types
-    -Werror=return-type
-    -Wno-error=incompatible-pointer-types-discards-qualifiers
-    -Wno-incompatible-pointer-types-discards-qualifiers
-    -Wno-error=array-parameter
-)
+if [ "$PLATFORM" = "Linux" ]; then
+    CLANG_WARN=(
+        -Wall
+        -Werror=incompatible-pointer-types
+        -Werror=return-type
+        -Wno-error=array-parameter
+    )
+else
+    CLANG_WARN=(
+        -Wall
+        -ferror-limit=3
+        -Werror=incompatible-pointer-types
+        -Werror=return-type
+        -Wno-error=incompatible-pointer-types-discards-qualifiers
+        -Wno-incompatible-pointer-types-discards-qualifiers
+        -Wno-error=array-parameter
+    )
+fi
 
 download() {
     local name=$1 url=$2
@@ -82,7 +91,7 @@ download() {
     echo "Downloading $name..."
     case "$url" in
         *.zip) curl -sL "$url" -o "$name.zip" && unzip -q "$name.zip" && rm "$name.zip" ;;
-        *)     curl -sL "$url" -o "$name.tar.gz" && tar xf "$name.tar.gz" && rm "$name.tar.gz" ;;
+        *)     curl -sL "$url" -o "$name.tar.gz" && tar --no-same-owner -xf "$name.tar.gz" && rm "$name.tar.gz" ;;
     esac
 }
 
@@ -168,8 +177,16 @@ elif [ "$MODE" = "web" ]; then
     exit 0
 fi
 
-# Find cuDNN path
-CUDA_HOME=${CUDA_HOME:-${CUDA_PATH:-$(dirname "$(dirname "$(which nvcc)")")}}
+# Find CUDA/cuDNN/NCCL paths
+if [ -z "${CUDA_HOME:-}" ]; then
+    if [ -n "${CUDA_PATH:-}" ]; then
+        CUDA_HOME="$CUDA_PATH"
+    elif command -v nvcc >/dev/null 2>&1; then
+        CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
+    else
+        CUDA_HOME="/usr/local/cuda"
+    fi
+fi
 CUDNN_IFLAG=""
 CUDNN_LFLAG=""
 CUDNN_LIB_ARG="-lcudnn"
@@ -227,9 +244,25 @@ if [ -z "$NCCL_LFLAG" ]; then
     NCCL_LFLAG=$(python -c "import nvidia.nccl, os; print('-L' + os.path.join(nvidia.nccl.__path__[0], 'lib'))" 2>/dev/null || echo "")
 fi
 
+NVIDIA_ML_LFLAG=""
+NVIDIA_ML_LIB_ARG="-lnvidia-ml"
+for dir in /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64 /usr/local/cuda/targets/x86_64-linux/lib/stubs; do
+    if [ -f "$dir/libnvidia-ml.so" ]; then
+        NVIDIA_ML_LFLAG="-L$dir"
+        NVIDIA_ML_LIB_ARG="-lnvidia-ml"
+        break
+    fi
+    NVIDIA_ML_VERSIONED=$(ls "$dir"/libnvidia-ml.so.* 2>/dev/null | sort | tail -1 || true)
+    if [ -n "$NVIDIA_ML_VERSIONED" ]; then
+        NVIDIA_ML_LFLAG="-L$dir"
+        NVIDIA_ML_LIB_ARG="-l:$(basename "$NVIDIA_ML_VERSIONED")"
+        break
+    fi
+done
+
 WHEEL_RPATH_FLAGS=()
 NVCC_WHEEL_RPATH_FLAGS=()
-for lib_flag in "$CUDNN_LFLAG" "$NCCL_LFLAG"; do
+for lib_flag in "$CUDNN_LFLAG" "$NCCL_LFLAG" "$NVIDIA_ML_LFLAG"; do
     if [[ "$lib_flag" == -L* ]]; then
         WHEEL_RPATH_FLAGS+=("-Wl,-rpath,${lib_flag#-L}")
         NVCC_WHEEL_RPATH_FLAGS+=("-Xlinker" "-rpath" "-Xlinker" "${lib_flag#-L}")
@@ -239,8 +272,22 @@ done
 export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
 export CCACHE_BASEDIR="$(pwd)"
 export CCACHE_COMPILERCHECK=content
-NVCC="ccache $CUDA_HOME/bin/nvcc"
-CC="${CC:-$(command -v ccache >/dev/null && echo 'ccache clang' || echo 'clang')}"
+NVCC_BIN="$CUDA_HOME/bin/nvcc"
+if [ ! -x "$NVCC_BIN" ]; then
+    NVCC_BIN="$(command -v nvcc || true)"
+fi
+if command -v ccache >/dev/null 2>&1; then
+    NVCC="ccache $NVCC_BIN"
+else
+    NVCC="$NVCC_BIN"
+fi
+if [ "$PLATFORM" = "Linux" ]; then
+    CC="${CC:-$(command -v ccache >/dev/null && echo 'ccache gcc' || echo 'gcc')}"
+    CXX="${CXX:-$(command -v ccache >/dev/null && echo 'ccache g++' || echo 'g++')}"
+else
+    CC="${CC:-$(command -v ccache >/dev/null && echo 'ccache clang' || echo 'clang')}"
+    CXX="${CXX:-$(command -v ccache >/dev/null && echo 'ccache clang++' || echo 'clang++')}"
+fi
 ARCH=${NVCC_ARCH:-native}
 
 PYTHON_INCLUDE=$(python -c "import sysconfig; print(sysconfig.get_path('include'))")
@@ -320,9 +367,9 @@ if [ -z "$MODE" ]; then
     LINK_CMD=(
         ${CXX:-g++} -shared -fPIC -fopenmp
         "${LINK_OBJECTS[@]}" "$STATIC_LIB" "$RAYLIB_A"
-        -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG
+        -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG $NVIDIA_ML_LFLAG
         "${WHEEL_RPATH_FLAGS[@]}"
-        -lcudart -lnccl -lnvidia-ml -lcublas -lcusolver -lcurand "$CUDNN_LIB_ARG"
+        -lcudart -lnccl "$NVIDIA_ML_LIB_ARG" -lcublas -lcusolver -lcurand "$CUDNN_LIB_ARG"
         $OMP_LIB $LINK_OPT
         "${SHARED_LDFLAGS[@]}"
         -o "$OUTPUT"
@@ -382,9 +429,9 @@ elif [ "$MODE" = "profile" ]; then
         tests/profile_kernels.cu vendor/ini.c \
         "${PROFILE_OBJECTS[@]}" \
         "$STATIC_LIB" "$RAYLIB_A" \
-        -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG \
+        -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG $NVIDIA_ML_LFLAG \
         "${NVCC_WHEEL_RPATH_FLAGS[@]}" \
-        -lnccl -lnvidia-ml -lcublas -lcurand "$CUDNN_LIB_ARG" \
+        -lnccl "$NVIDIA_ML_LIB_ARG" -lcublas -lcurand "$CUDNN_LIB_ARG" \
         -lGL -lm -lpthread $OMP_LIB \
         -o profile
     echo "Built: ./profile"

@@ -153,27 +153,48 @@ __device__ __forceinline__ float logaddexp(float a, float b) {
     return (diff < -88.0f) ? m : m + log1pf(__expf(diff));
 }
 
-//TODO: Speed up. The previous version was misaligned.
 __device__ __forceinline__ void copy_bytes(
     const char* __restrict__ src, char* __restrict__ dst,
     int src_row, int dst_row, int row_bytes) {
     const char* s = src + (int64_t)src_row * row_bytes;
     char* d = dst + (int64_t)dst_row * row_bytes;
+
+    uintptr_t addr_mask = (uintptr_t)s | (uintptr_t)d;
+
+    if (((addr_mask | (uintptr_t)row_bytes) & 0xF) == 0) {
+        const uint4* sv = (const uint4*)s;
+        uint4* dv = (uint4*)d;
+        int n = row_bytes / (int)sizeof(uint4);
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
+            dv[i] = sv[i];
+        }
+        return;
+    }
+
+    if (((addr_mask | (uintptr_t)row_bytes) & 0x7) == 0) {
+        const unsigned long long* sv = (const unsigned long long*)s;
+        unsigned long long* dv = (unsigned long long*)d;
+        int n = row_bytes / (int)sizeof(unsigned long long);
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
+            dv[i] = sv[i];
+        }
+        return;
+    }
+
+    if (((addr_mask | (uintptr_t)row_bytes) & 0x3) == 0) {
+        const uint32_t* sv = (const uint32_t*)s;
+        uint32_t* dv = (uint32_t*)d;
+        int n = row_bytes / (int)sizeof(uint32_t);
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
+            dv[i] = sv[i];
+        }
+        return;
+    }
+
     for (int i = threadIdx.x; i < row_bytes; i += blockDim.x) {
         d[i] = s[i];
     }
 }
-
-/*
-__device__ __forceinline__ void copy_bytes(const char* __restrict__ src,
-        char* __restrict__ dst, int src_row, int dst_row, int row_bytes) {
-    const int* soffset = (const int*)(src + (int64_t)src_row * row_bytes);
-    int* doffset = (int*)(dst + (int64_t)dst_row * row_bytes);
-    for (int i = threadIdx.x; i < row_bytes / 4; i += blockDim.x) {
-        doffset[i] = soffset[i];
-    }
-}
-*/
 
 // Transpose dims 0,1: [A, B, C] -> [B, A, C]. For 2D, pass C=1.
 __global__ void transpose_102(precision_t* __restrict__ dst,

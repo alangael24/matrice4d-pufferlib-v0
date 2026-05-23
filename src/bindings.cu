@@ -497,6 +497,8 @@ std::unique_ptr<PuffeRL> create_pufferl(py::dict args) {
     // Priority
     hypers.prio_alpha = get_config(train_kwargs, "prio_alpha");
     hypers.prio_beta0 = get_config(train_kwargs, "prio_beta0");
+    hypers.epopt_alpha = get_config(train_kwargs, "epopt_alpha");
+    hypers.epopt_quantile = get_config(train_kwargs, "epopt_quantile");
     hypers.reset_state = get_config(args, "reset_state");
     hypers.deterministic_eval = get_config(args, "deterministic_eval");
     // Base-level config ([base] section becomes top-level in args)
@@ -621,6 +623,8 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("vtrace_c_clip", &HypersT::vtrace_c_clip)
         .def_readwrite("prio_alpha", &HypersT::prio_alpha)
         .def_readwrite("prio_beta0", &HypersT::prio_beta0)
+        .def_readwrite("epopt_alpha", &HypersT::epopt_alpha)
+        .def_readwrite("epopt_quantile", &HypersT::epopt_quantile)
         .def_readwrite("cudagraphs", &HypersT::cudagraphs)
         .def_readwrite("profile", &HypersT::profile)
         .def_readwrite("rank", &HypersT::rank)

@@ -64,6 +64,60 @@ static int env_action_mode(const char* key, int fallback) {
     exit(2);
 }
 
+static float slew_limited_value(float raw, float prev, int has_prev, float da_max) {
+    if (!has_prev || da_max <= 0.0f) {
+        return raw;
+    }
+    float delta = raw - prev;
+    if (delta > da_max) delta = da_max;
+    if (delta < -da_max) delta = -da_max;
+    return prev + delta;
+}
+
+static void apply_slew_limiter_for_agent(float* actions, const float* prev_actions,
+                                         int has_prev, float da_max) {
+    if (!has_prev || da_max <= 0.0f) {
+        return;
+    }
+    for (int a = 0; a < 4; a++) {
+        actions[a] = slew_limited_value(actions[a], prev_actions[a], 1, da_max);
+    }
+}
+
+static float mean_abs_delta4(const float* a, const float* b) {
+    float delta = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        delta += fabsf(a[i] - b[i]);
+    }
+    return 0.25f * delta;
+}
+
+static float post_lag_motor_jump_for_agent(const Drone* agent, const float* reset_actions,
+                                           const float* continued_actions) {
+    Drone reset_drone = *agent;
+    Drone continued_drone = *agent;
+    float reset_local[4] = {
+        reset_actions[0],
+        reset_actions[1],
+        reset_actions[2],
+        reset_actions[3],
+    };
+    float continued_local[4] = {
+        continued_actions[0],
+        continued_actions[1],
+        continued_actions[2],
+        continued_actions[3],
+    };
+    move_drone(&reset_drone, reset_local);
+    move_drone(&continued_drone, continued_local);
+    float inv_max_rpm = 1.0f / fmaxf(agent->params.max_rpm, 1e-6f);
+    float jump = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        jump += fabsf(reset_drone.state.rpms[i] - continued_drone.state.rpms[i]) * inv_max_rpm;
+    }
+    return 0.25f * jump;
+}
+
 static void configure_common(DroneEnv* env, int num_agents) {
     env->num_agents = num_agents;
     env->max_rings = 10;
@@ -210,6 +264,13 @@ static void configure_dr_hard(DroneEnv* env, int num_agents) {
     env->sensor_noise = 0.02f;
 }
 
+static void configure_dr_hard_small(DroneEnv* env, int num_agents) {
+    configure_dr_hard(env, num_agents);
+
+    env->reset_pos_scale = 0.75f;
+    env->reset_vel_max = 0.15f;
+}
+
 static void configure_dr_family_v1(DroneEnv* env, int num_agents) {
     configure_common(env, num_agents);
 
@@ -304,6 +365,72 @@ static void configure_dr_family_v1a(DroneEnv* env, int num_agents) {
     env->sensor_noise = 0.0f;
 }
 
+static void configure_dr_family_v1a_super_large(DroneEnv* env, int num_agents) {
+    configure_dr_family_v1a(env, num_agents);
+
+    env->dr_usable_t2w_min = 2.6f;
+    env->dr_usable_t2w_max = 3.4f;
+    env->dr_mass_min = 1.18f;
+    env->dr_mass_max = 1.25f;
+    env->dr_inertia_min = 1.35f;
+    env->dr_inertia_max = 1.60f;
+    env->dr_motor_thrust_min = 0.92f;
+    env->dr_motor_thrust_max = 1.08f;
+    env->dr_motor_tau_min = 0.14f;
+    env->dr_motor_tau_max = 0.22f;
+    env->dr_com_xy = 0.015f;
+    env->dr_com_z = 0.010f;
+    env->reset_pos_scale = 0.25f;
+}
+
+static void configure_dr_family_v1a_ultra_large(DroneEnv* env, int num_agents) {
+    configure_dr_family_v1a(env, num_agents);
+
+    env->dr_usable_t2w_min = 3.0f;
+    env->dr_usable_t2w_max = 4.0f;
+    env->dr_mass_min = 1.45f;
+    env->dr_mass_max = 1.80f;
+    env->dr_inertia_min = 2.00f;
+    env->dr_inertia_max = 3.20f;
+    env->dr_motor_thrust_min = 0.95f;
+    env->dr_motor_thrust_max = 1.05f;
+    env->dr_motor_tau_min = 0.16f;
+    env->dr_motor_tau_max = 0.24f;
+    env->dr_com_xy = 0.012f;
+    env->dr_com_z = 0.008f;
+    env->reset_pos_scale = 0.20f;
+    env->reset_vel_max = 0.1f;
+}
+
+static void configure_dr_family_v1a_ultra_large_low_authority(DroneEnv* env, int num_agents) {
+    configure_dr_family_v1a(env, num_agents);
+
+    env->dr_usable_t2w_min = 1.55f;
+    env->dr_usable_t2w_max = 1.95f;
+    env->dr_mass_min = 1.45f;
+    env->dr_mass_max = 1.80f;
+    env->dr_inertia_min = 2.00f;
+    env->dr_inertia_max = 3.20f;
+    env->dr_motor_thrust_min = 0.85f;
+    env->dr_motor_thrust_max = 0.98f;
+    env->dr_motor_tau_min = 0.20f;
+    env->dr_motor_tau_max = 0.28f;
+    env->dr_com_xy = 0.018f;
+    env->dr_com_z = 0.010f;
+    env->reset_pos_scale = 0.20f;
+    env->reset_vel_max = 0.1f;
+}
+
+static void configure_dr_family_v1a2_mix(DroneEnv* env, int num_agents) {
+    configure_dr_family_v1a(env, num_agents);
+    env->dr_profile_mix = 1.0f;
+}
+
+static void configure_dr_edgefix_capped_mix(DroneEnv* env, int num_agents) {
+    configure_dr_family_v1a(env, num_agents);
+    env->dr_profile_mix = 2.0f;
+}
+
 static void configure_low_authority_holdout(DroneEnv* env, int num_agents) {
     configure_dr_family_v05(env, num_agents);
 
@@ -311,11 +438,29 @@ static void configure_low_authority_holdout(DroneEnv* env, int num_agents) {
     env->dr_usable_t2w_max = 1.80f;
 }
 
+static void configure_edge_low_authority(DroneEnv* env, int num_agents) {
+    configure_dr_family_v05(env, num_agents);
+
+    env->dr_usable_t2w_min = 2.00f;
+    env->dr_usable_t2w_max = 2.15f;
+    env->dr_motor_tau_min = 0.06f;
+    env->dr_motor_tau_max = 0.20f;
+}
+
 static void configure_motor_tau_high_holdout(DroneEnv* env, int num_agents) {
     configure_dr_family_v05(env, num_agents);
 
     env->dr_motor_tau_min = 0.20f;
     env->dr_motor_tau_max = 0.35f;
+}
+
+static void configure_edge_high_tau(DroneEnv* env, int num_agents) {
+    configure_dr_family_v05(env, num_agents);
+
+    env->dr_usable_t2w_min = 2.20f;
+    env->dr_usable_t2w_max = 3.80f;
+    env->dr_motor_tau_min = 0.22f;
+    env->dr_motor_tau_max = 0.24f;
 }
 
 static void configure_mass_high_holdout(DroneEnv* env, int num_agents) {
@@ -349,6 +494,28 @@ static void apply_fixed_motor_profile(Drone* agent, const float scales[4], float
     recompute_hover_rpms(agent);
 }
 
+static void apply_small_airframe_profile(Drone* agent) {
+    Params* p = &agent->params;
+    const float mass_mult = 0.65f;
+    const float inertia_mult = 0.55f;
+    const float arm_mult = 0.78f;
+
+    p->mass = BASE_MASS * mass_mult;
+    p->mass_mult = mass_mult;
+    p->ixx = BASE_IXX * inertia_mult;
+    p->iyy = BASE_IYY * inertia_mult;
+    p->izz = BASE_IZZ * inertia_mult;
+    p->ixx_mult = inertia_mult;
+    p->iyy_mult = inertia_mult;
+    p->izz_mult = inertia_mult;
+    p->arm_len = BASE_ARM_LEN * arm_mult;
+    for (int i = 0; i < 4; i++) {
+        p->motor_x[i] *= arm_mult;
+        p->motor_y[i] *= arm_mult;
+    }
+    recompute_hover_rpms(agent);
+}
+
 static void apply_eval_profile_after_reset(DroneEnv* env, Drone* agent, const char* config) {
     (void)env;
     if (strcmp(config, "mixed_motors_mild") == 0) {
@@ -362,6 +529,8 @@ static void apply_eval_profile_after_reset(DroneEnv* env, Drone* agent, const ch
                strcmp(config, "mad_bsc_capped") == 0) {
         const float scales[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         apply_fixed_motor_profile(agent, scales, 2.91f, 0.50f);
+    } else if (strcmp(config, "hard_small") == 0) {
+        apply_small_airframe_profile(agent);
     }
 }
 
@@ -385,19 +554,40 @@ static void configure_env(DroneEnv* env, const char* config, int num_agents) {
         configure_dr_medium(env, num_agents);
     } else if (strcmp(config, "hard") == 0) {
         configure_dr_hard(env, num_agents);
+    } else if (strcmp(config, "hard_small") == 0) {
+        configure_dr_hard_small(env, num_agents);
     } else if (strcmp(config, "family_v1") == 0 ||
                strcmp(config, "family_v1_holdout_raw") == 0) {
         configure_dr_family_v1(env, num_agents);
     } else if (strcmp(config, "family_v05") == 0 ||
+               strcmp(config, "family_v0.5") == 0 ||
                strcmp(config, "family_v0.5_authority_gated") == 0) {
         configure_dr_family_v05(env, num_agents);
     } else if (strcmp(config, "family_v1a") == 0 ||
                strcmp(config, "family_v1a_authority_gated") == 0) {
         configure_dr_family_v1a(env, num_agents);
+    } else if (strcmp(config, "family_v1a_super_large") == 0) {
+        configure_dr_family_v1a_super_large(env, num_agents);
+    } else if (strcmp(config, "family_v1a_ultra_large") == 0) {
+        configure_dr_family_v1a_ultra_large(env, num_agents);
+    } else if (strcmp(config, "family_v1a_ultra_large_low_authority") == 0) {
+        configure_dr_family_v1a_ultra_large_low_authority(env, num_agents);
+    } else if (strcmp(config, "family_v1a2_mix") == 0 ||
+               strcmp(config, "family_v1a.2_mix") == 0 ||
+               strcmp(config, "v1a2_mix") == 0 ||
+               strcmp(config, "v1a.2_mix") == 0) {
+        configure_dr_family_v1a2_mix(env, num_agents);
+    } else if (strcmp(config, "edgefix_capped_mix") == 0 ||
+               strcmp(config, "v1_edgefix_capped_mix") == 0) {
+        configure_dr_edgefix_capped_mix(env, num_agents);
     } else if (strcmp(config, "low_authority_holdout") == 0) {
         configure_low_authority_holdout(env, num_agents);
+    } else if (strcmp(config, "edge_low_authority") == 0) {
+        configure_edge_low_authority(env, num_agents);
     } else if (strcmp(config, "motor_tau_high_holdout") == 0) {
         configure_motor_tau_high_holdout(env, num_agents);
+    } else if (strcmp(config, "edge_high_tau") == 0) {
+        configure_edge_high_tau(env, num_agents);
     } else if (strcmp(config, "mass_high_holdout") == 0) {
         configure_mass_high_holdout(env, num_agents);
     } else if (strcmp(config, "mixed_motors_mild") == 0 ||
@@ -409,10 +599,13 @@ static void configure_env(DroneEnv* env, const char* config, int num_agents) {
     } else {
         fprintf(stderr,
                 "Unknown config '%s'; valid: baseline, nominal, light, narrow20, medium, "
-                "hard, family_v1, family_v1_holdout_raw, family_v05, "
+                "hard, hard_small, family_v1, family_v1_holdout_raw, family_v05, "
                 "family_v0.5_authority_gated, family_v1a, "
-                "family_v1a_authority_gated, low_authority_holdout, "
-                "motor_tau_high_holdout, mass_high_holdout, mixed_motors_mild, "
+                "family_v1a_authority_gated, family_v1a_super_large, "
+                "family_v1a_ultra_large, family_v1a_ultra_large_low_authority, "
+                "v1a.2_mix, edgefix_capped_mix, "
+                "edge_low_authority, edge_high_tau, low_authority_holdout, motor_tau_high_holdout, "
+                "mass_high_holdout, mixed_motors_mild, "
                 "3plus1_mismatch, capped_high_thrust\n",
                 config);
         exit(2);
@@ -467,6 +660,7 @@ int main(int argc, char** argv) {
     int reset_state_interval = getenv("M4D_RESET_STATE_INTERVAL")
                                    ? atoi(getenv("M4D_RESET_STATE_INTERVAL"))
                                    : M4D_DEPLOY_DEFAULT_RESET_INTERVAL;
+    float slew_da_max = env_float("M4D_SLEW_DA_MAX", 0.0f);
     env->rng = getenv("M4D_ENV_SEED") ? (unsigned int)atoi(getenv("M4D_ENV_SEED")) : 42u;
     srand(policy_seed);
     if (sample_actions) {
@@ -496,10 +690,11 @@ int main(int argc, char** argv) {
 
     printf("config=%s action_scale=%.6f action_mode=%d normalized_thrust_min=%.6f "
            "normalized_thrust_max=%.6f num_agents=%d deterministic=%d sample_actions=%d "
-           "policy_seed=%u env_seed=%u trace_steps=%d reset_state_interval=%d\n",
+           "policy_seed=%u env_seed=%u trace_steps=%d reset_state_interval=%d "
+           "slew_da_max=%.6f\n",
            config, env->action_scale, env->action_mode, env->normalized_thrust_min,
            env->normalized_thrust_max, env->num_agents, 1, 0, policy_seed, env->rng, trace_steps,
-           reset_state_interval);
+           reset_state_interval, slew_da_max);
 
     const size_t obs_size = 23;
     env->observations = (float*)calloc(env->num_agents * obs_size, sizeof(float));
@@ -528,14 +723,20 @@ int main(int argc, char** argv) {
     double sum_len = 0.0;
     double action_delta_sum = 0.0;
     double reset_jump_sum = 0.0;
+    double post_slew_reset_jump_sum = 0.0;
+    double post_lag_motor_jump_sum = 0.0;
     float reset_jump_max = 0.0f;
     long action_delta_count = 0;
     long reset_jump_count = 0;
+    long post_slew_reset_jump_count = 0;
+    long post_lag_motor_jump_count = 0;
     float min_return = 0.0f;
     float max_return = 0.0f;
     float* prev_actions = (float*)calloc((size_t)env->num_agents * 4, sizeof(float));
     unsigned char* has_prev_action = (unsigned char*)calloc(env->num_agents, sizeof(unsigned char));
     float* continued_actions = (float*)calloc((size_t)env->num_agents * 4, sizeof(float));
+    float* continued_limited_actions =
+        (float*)calloc((size_t)env->num_agents * 4, sizeof(float));
     float* state_backup = (float*)calloc((size_t)M4D_DEPLOY_NUM_LAYERS * env->num_agents *
                                              M4D_DEPLOY_HIDDEN_SIZE,
                                          sizeof(float));
@@ -566,6 +767,8 @@ int main(int argc, char** argv) {
     FloatVec omega_samples = {0};
     FloatVec action_delta_samples = {0};
     FloatVec reset_jump_samples = {0};
+    FloatVec post_slew_reset_jump_samples = {0};
+    FloatVec post_lag_motor_jump_samples = {0};
     int step = 0;
 
     apply_eval_profile_all(env, config);
@@ -634,20 +837,41 @@ int main(int argc, char** argv) {
             policy.step += 1;
 
             for (int i = 0; i < env->num_agents; i++) {
-                float jump = 0.0f;
+                float* reset_action = &env->actions[4 * i];
+                float* continued_action = &continued_actions[4 * i];
+                float* continued_limited_action = &continued_limited_actions[4 * i];
+                float* prev_action = &prev_actions[4 * i];
+
+                float jump = mean_abs_delta4(reset_action, continued_action);
                 for (int a = 0; a < 4; a++) {
-                    jump += fabsf(env->actions[4 * i + a] - continued_actions[4 * i + a]);
+                    continued_limited_action[a] = slew_limited_value(
+                        continued_action[a], prev_action[a], has_prev_action[i], slew_da_max);
+                    reset_action[a] = slew_limited_value(
+                        reset_action[a], prev_action[a], has_prev_action[i], slew_da_max);
                 }
-                jump *= 0.25f;
+                float post_slew_jump = mean_abs_delta4(reset_action, continued_limited_action);
+                float post_lag_motor_jump = post_lag_motor_jump_for_agent(
+                    &env->agents[i], reset_action, continued_limited_action);
+
                 reset_jump_sum += jump;
                 if (jump > reset_jump_max) reset_jump_max = jump;
                 reset_jump_count += 1;
                 float_vec_push(&reset_jump_samples, jump);
+                post_slew_reset_jump_sum += post_slew_jump;
+                post_slew_reset_jump_count += 1;
+                float_vec_push(&post_slew_reset_jump_samples, post_slew_jump);
+                post_lag_motor_jump_sum += post_lag_motor_jump;
+                post_lag_motor_jump_count += 1;
+                float_vec_push(&post_lag_motor_jump_samples, post_lag_motor_jump);
                 ep_reset_jump_sum[i] += jump;
                 ep_reset_jump_count[i] += 1;
             }
         } else {
             m4d_deploy_forward(&policy, env->observations, env->actions);
+            for (int i = 0; i < env->num_agents; i++) {
+                apply_slew_limiter_for_agent(&env->actions[4 * i], &prev_actions[4 * i],
+                                             has_prev_action[i], slew_da_max);
+            }
         }
 
         count_nonfinite_array(env->actions, (size_t)env->num_agents * 4, &nan_inf_count);
@@ -818,10 +1042,20 @@ int main(int argc, char** argv) {
     float p99_omega = percentile(&omega_samples, 0.99f);
     float p95_action_delta = percentile(&action_delta_samples, 0.95f);
     float p95_reset_jump = percentile(&reset_jump_samples, 0.95f);
+    float p95_post_slew_reset_jump = percentile(&post_slew_reset_jump_samples, 0.95f);
+    float p95_post_lag_motor_jump = percentile(&post_lag_motor_jump_samples, 0.95f);
     double mean_abs_delta_action =
         action_delta_count > 0 ? action_delta_sum / (double)action_delta_count : 0.0;
     double reset32_action_jump =
         reset_jump_count > 0 ? reset_jump_sum / (double)reset_jump_count : 0.0;
+    double post_slew_reset_jump =
+        post_slew_reset_jump_count > 0
+            ? post_slew_reset_jump_sum / (double)post_slew_reset_jump_count
+            : 0.0;
+    double post_lag_motor_jump =
+        post_lag_motor_jump_count > 0
+            ? post_lag_motor_jump_sum / (double)post_lag_motor_jump_count
+            : 0.0;
 
     printf("summary episodes=%d mean_return=%.6f std_return=%.6f min_return=%.6f "
            "max_return=%.6f timeout_rate=%.6f oob_rate=%.6f mean_len=%.6f\n",
@@ -844,6 +1078,12 @@ int main(int argc, char** argv) {
            "reset32_action_jump_max=%.6f reset32_action_jump_count=%ld\n",
            mean_abs_delta_action, p95_action_delta, reset32_action_jump, p95_reset_jump,
            reset_jump_max, reset_jump_count);
+    printf("slew pre_slew_reset_jump=%.6f pre_slew_reset_jump_p95=%.6f "
+           "post_slew_reset_jump=%.6f post_slew_reset_jump_p95=%.6f "
+           "post_lag_motor_jump=%.6f post_lag_motor_jump_p95=%.6f "
+           "slew_da_max=%.6f\n",
+           reset32_action_jump, p95_reset_jump, post_slew_reset_jump, p95_post_slew_reset_jump,
+           post_lag_motor_jump, p95_post_lag_motor_jump, slew_da_max);
     printf("percentiles p95_dist=%.6f p99_dist=%.6f p95_omega=%.6f p99_omega=%.6f "
            "samples=%zu nan_inf_count=%ld\n",
            p95_dist, p99_dist, p95_omega, p99_omega, dist_samples.len, nan_inf_count);
@@ -869,6 +1109,19 @@ int main(int argc, char** argv) {
            env->log.n > 0.0f ? env->log.action_saturation_frac / env->log.n : 0.0f,
            mean_abs_delta_action, p95_action_delta, reset32_action_jump, p95_reset_jump,
            p95_dist, p99_dist, p95_omega, p99_omega, nan_inf_count);
+    printf("csv_slew,%s,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+           "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%ld,%.6f,%.6f,%.6f,"
+           "%.6f,%.6f,%.6f,%.6f\n",
+           config, env->action_scale, env->num_agents, completed, oob_rate, timeout_rate,
+           env->log.n > 0.0f ? env->log.ema_dist / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.ema_vel / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.ema_omega_z / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.mean_abs_action / env->log.n : 0.0f,
+           env->log.n > 0.0f ? env->log.action_saturation_frac / env->log.n : 0.0f,
+           mean_abs_delta_action, p95_action_delta, reset32_action_jump, p95_reset_jump,
+           p95_dist, p99_dist, p95_omega, p99_omega, nan_inf_count, slew_da_max,
+           reset32_action_jump, p95_reset_jump, post_slew_reset_jump, p95_post_slew_reset_jump,
+           post_lag_motor_jump, p95_post_lag_motor_jump);
 
     c_close(env);
     m4d_deploy_close(&policy);
@@ -884,6 +1137,7 @@ int main(int argc, char** argv) {
     free(prev_actions);
     free(has_prev_action);
     free(continued_actions);
+    free(continued_limited_actions);
     free(state_backup);
     free(ep_action_abs_sum);
     free(ep_action_saturation_sum);
@@ -912,6 +1166,8 @@ int main(int argc, char** argv) {
     free(omega_samples.data);
     free(action_delta_samples.data);
     free(reset_jump_samples.data);
+    free(post_slew_reset_jump_samples.data);
+    free(post_lag_motor_jump_samples.data);
     free(env);
     return 0;
 }

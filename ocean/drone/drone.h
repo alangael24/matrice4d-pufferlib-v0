@@ -81,6 +81,27 @@ struct DroneEnv {
     float dr_angular_damping_min;
     float dr_angular_damping_max;
     float dr_profile_mix;
+    float adr_enabled;
+    float adr_mode;
+    float adr_probe_prob;
+    float adr_success_threshold;
+    float adr_contract_threshold;
+    float adr_step;
+    float adr_eval_episodes;
+    float adr_init_usable_t2w_min;
+    float adr_init_usable_t2w_max;
+    float adr_init_mass_min;
+    float adr_init_mass_max;
+    float adr_init_inertia_min;
+    float adr_init_inertia_max;
+    float adr_init_motor_thrust_min;
+    float adr_init_motor_thrust_max;
+    float adr_init_motor_tau_min;
+    float adr_init_motor_tau_max;
+    float adr_init_com_xy;
+    float pal_probe_prob;
+    int pal_probe_steps;
+    float pal_probe_amp;
     float action_scale;
     int action_mode;
     float normalized_thrust_min;
@@ -294,6 +315,29 @@ static inline void apply_action_latency(Drone* agent, float raw_actions[4], int 
     }
 }
 
+static inline void apply_pal_probe(DroneEnv* env, Drone* agent, float actions[4]) {
+    int steps = env->pal_probe_steps;
+    float amp = fabsf(env->pal_probe_amp);
+    if (!agent->pal_probe_active || steps <= 0 || amp <= 0.0f) return;
+    if (agent->episode_length < 0 || agent->episode_length >= steps) return;
+
+    float pattern[4] = {0};
+    switch (agent->episode_length % 8) {
+        case 0: pattern[0] =  1.0f; pattern[1] =  1.0f; pattern[2] =  1.0f; pattern[3] =  1.0f; break;
+        case 1: pattern[0] = -1.0f; pattern[1] = -1.0f; pattern[2] = -1.0f; pattern[3] = -1.0f; break;
+        case 2: pattern[0] =  1.0f; pattern[1] = -1.0f; pattern[2] =  1.0f; pattern[3] = -1.0f; break;
+        case 3: pattern[0] = -1.0f; pattern[1] =  1.0f; pattern[2] = -1.0f; pattern[3] =  1.0f; break;
+        case 4: pattern[0] =  1.0f; pattern[1] =  1.0f; pattern[2] = -1.0f; pattern[3] = -1.0f; break;
+        case 5: pattern[0] = -1.0f; pattern[1] = -1.0f; pattern[2] =  1.0f; pattern[3] =  1.0f; break;
+        case 6: pattern[0] =  1.0f; pattern[1] = -1.0f; pattern[2] = -1.0f; pattern[3] =  1.0f; break;
+        default: pattern[0] = -1.0f; pattern[1] =  1.0f; pattern[2] =  1.0f; pattern[3] = -1.0f; break;
+    }
+
+    for (int m = 0; m < 4; m++) {
+        actions[m] = clampf(actions[m] + amp * pattern[m], -1.0f, 1.0f);
+    }
+}
+
 static inline DomainRandomization env_domain_randomization(DroneEnv* env) {
     return (DomainRandomization){
         .enabled = env->domain_randomization,
@@ -349,6 +393,7 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->reset_action_jump_sum = 0.0f;
     agent->reset_action_jump_count = 0.0f;
     agent->has_prev_action = 0;
+    agent->pal_probe_active = rndf(0.0f, 1.0f, &env->rng) < clampf(env->pal_probe_prob, 0.0f, 1.0f);
     for (int i = 0; i < 4; i++) agent->prev_action[i] = 0.0f;
     agent->motor_clip_low_count = 0.0f;
     agent->motor_clip_high_count = 0.0f;
@@ -370,7 +415,10 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->params.action_scale = env->action_scale;
     agent->params.action_mode = env->action_mode;
     agent->params.normalized_thrust_min = env->normalized_thrust_min;
-    agent->params.normalized_thrust_max = env->normalized_thrust_max;
+    if (!(env->domain_randomization > 0.0f && env->dr_authority_gated > 0.0f
+          && env->dr_profile_mix >= 2.0f && env->dr_profile_mix < 3.0f)) {
+        agent->params.normalized_thrust_max = env->normalized_thrust_max;
+    }
 
     float pos_scale = clampf(env->reset_pos_scale, 0.0f, 1.0f);
     agent->state.pos = (Vec3){
@@ -441,6 +489,7 @@ void c_step(DroneEnv* env) {
             env->actions[4 * i + 2],
             env->actions[4 * i + 3],
         };
+        apply_pal_probe(env, agent, raw_actions);
         float action_delta_mean = 0.0f;
         if (agent->has_prev_action) {
             for (int m = 0; m < 4; m++) {

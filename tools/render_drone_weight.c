@@ -72,6 +72,18 @@ static void configure_baseline(DroneEnv* env) {
     env->dr_com_z = 0.0f;
 }
 
+static void configure_nominal_normalized(DroneEnv* env) {
+    configure_baseline(env);
+
+    env->alpha_omega_z_mult = 5.0f;
+    env->action_scale = 1.0f;
+    env->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    env->normalized_thrust_min = 0.0f;
+    env->normalized_thrust_max = 0.85f;
+    env->reset_yaw_range = 3.14159f;
+    env->reset_vel_max = 0.2f;
+}
+
 static void configure_dr_light(DroneEnv* env) {
     configure_common(env);
 
@@ -120,6 +132,14 @@ static void configure_dr_hard(DroneEnv* env) {
     env->action_scale = 0.7f;
     env->action_latency = 0.02f;
     env->sensor_noise = 0.02f;
+}
+
+static void configure_dr_hard_small(DroneEnv* env) {
+    configure_dr_hard(env);
+
+    env->num_agents = 4;
+    env->reset_pos_scale = 0.75f;
+    env->reset_vel_max = 0.15f;
 }
 
 static void configure_dr_family_v05(DroneEnv* env) {
@@ -251,6 +271,70 @@ static void configure_dr_family_v1a_ultra_large_low_authority(DroneEnv* env) {
     env->reset_vel_max = 0.1f;
 }
 
+static void recompute_hover_rpms(Drone* agent) {
+    float trim[4];
+    hover_trim_thrusts(&agent->params, trim);
+    for (int i = 0; i < 4; i++) {
+        agent->state.rpms[i] = thrust_to_rpm_i(&agent->params, i, trim[i]);
+    }
+}
+
+static void apply_fixed_motor_profile(Drone* agent, const float scales[4], float k_thrust_mult,
+                                      float normalized_thrust_max) {
+    Params* p = &agent->params;
+    p->action_mode = M4D_ACTION_NORMALIZED_THRUST;
+    p->action_scale = 1.0f;
+    p->normalized_thrust_min = 0.0f;
+    p->normalized_thrust_max = normalized_thrust_max;
+    p->k_thrust = BASE_K_THRUST * k_thrust_mult;
+    p->k_thrust_mult = k_thrust_mult;
+    p->mass_mult = p->mass / BASE_MASS;
+    for (int i = 0; i < 4; i++) {
+        p->motor_thrust_scale[i] = scales[i];
+    }
+    recompute_hover_rpms(agent);
+}
+
+static void apply_small_airframe_profile(Drone* agent) {
+    Params* p = &agent->params;
+    const float mass_mult = 0.65f;
+    const float inertia_mult = 0.55f;
+    const float arm_mult = 0.78f;
+
+    p->mass = BASE_MASS * mass_mult;
+    p->mass_mult = mass_mult;
+    p->ixx = BASE_IXX * inertia_mult;
+    p->iyy = BASE_IYY * inertia_mult;
+    p->izz = BASE_IZZ * inertia_mult;
+    p->ixx_mult = inertia_mult;
+    p->iyy_mult = inertia_mult;
+    p->izz_mult = inertia_mult;
+    p->arm_len = BASE_ARM_LEN * arm_mult;
+    for (int i = 0; i < 4; i++) {
+        p->motor_x[i] *= arm_mult;
+        p->motor_y[i] *= arm_mult;
+    }
+    recompute_hover_rpms(agent);
+}
+
+static void apply_render_profile_after_reset(DroneEnv* env, Drone* agent, const char* config) {
+    (void)env;
+    if (strcmp(config, "capped_high_thrust") == 0 ||
+        strcmp(config, "mad_bsc_capped") == 0) {
+        const float scales[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        apply_fixed_motor_profile(agent, scales, 2.91f, 0.50f);
+    } else if (strcmp(config, "hard_small") == 0) {
+        apply_small_airframe_profile(agent);
+    }
+}
+
+static void apply_render_profile_all(DroneEnv* env, const char* config) {
+    for (int i = 0; i < env->num_agents; i++) {
+        apply_render_profile_after_reset(env, &env->agents[i], config);
+    }
+    compute_observations(env);
+}
+
 static void configure_env(DroneEnv* env, const char* config) {
     if (strcmp(config, "baseline") == 0) {
         configure_baseline(env);
@@ -260,6 +344,8 @@ static void configure_env(DroneEnv* env, const char* config) {
         configure_dr_medium(env);
     } else if (strcmp(config, "hard") == 0) {
         configure_dr_hard(env);
+    } else if (strcmp(config, "hard_small") == 0) {
+        configure_dr_hard_small(env);
     } else if (strcmp(config, "family_v05") == 0 ||
                strcmp(config, "family_v0.5_authority_gated") == 0) {
         configure_dr_family_v05(env);
@@ -272,12 +358,15 @@ static void configure_env(DroneEnv* env, const char* config) {
         configure_dr_family_v1a_ultra_large(env);
     } else if (strcmp(config, "family_v1a_ultra_large_low_authority") == 0) {
         configure_dr_family_v1a_ultra_large_low_authority(env);
+    } else if (strcmp(config, "capped_high_thrust") == 0 ||
+               strcmp(config, "mad_bsc_capped") == 0) {
+        configure_nominal_normalized(env);
     } else {
         fprintf(stderr,
-                "Unknown config '%s'; valid: baseline, light, medium, hard, family_v05, "
+                "Unknown config '%s'; valid: baseline, light, medium, hard, hard_small, family_v05, "
                 "family_v0.5_authority_gated, family_v1a, family_v1a_authority_gated, "
                 "family_v1a_super_large, family_v1a_ultra_large, "
-                "family_v1a_ultra_large_low_authority\n",
+                "family_v1a_ultra_large_low_authority, capped_high_thrust\n",
                 config);
         exit(2);
     }
@@ -345,6 +434,7 @@ int main(int argc, char** argv) {
 
     init(env);
     c_reset(env);
+    apply_render_profile_all(env, config);
     c_render(env);
     SetTargetFPS(60);
 
@@ -374,6 +464,8 @@ int main(int argc, char** argv) {
 
                 episode_returns[i] = 0.0f;
                 episode_lengths[i] = 0;
+                apply_render_profile_after_reset(env, &env->agents[i], config);
+                compute_observations(env);
             }
         }
 

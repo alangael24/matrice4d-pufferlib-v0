@@ -285,6 +285,20 @@ class PuffeRL:
         rew = self.rewards.T.contiguous().clamp(-1, 1)
         ter = self.terminals.T.contiguous()
 
+        epopt_weights = torch.ones(self.total_agents, device=device)
+        epopt_alpha = config.get('epopt_alpha', 0.0)
+        epopt_quantile = config.get('epopt_quantile', 0.2)
+        if epopt_alpha > 0 and epopt_quantile > 0:
+            q = min(max(epopt_quantile, 1.0 / self.total_agents), 1.0)
+            segment_returns = rew.sum(axis=1)
+            k = max(1, int(np.ceil(q * self.total_agents)))
+            cutoff = torch.kthvalue(segment_returns, k).values
+            epopt_weights = torch.where(
+                segment_returns <= cutoff,
+                torch.full_like(epopt_weights, 1.0 + epopt_alpha / q),
+                epopt_weights,
+            )
+
         P = Profile
         prof.mark(0)
         num_minibatches = int(config['replay_ratio'] * self.batch_size / config['minibatch_size'])
@@ -301,6 +315,7 @@ class PuffeRL:
             idx = torch.multinomial(prio_probs,
                 self.minibatch_segments, replacement=True)
             mb_prio = (self.total_agents*prio_probs[idx, None])**-anneal_beta
+            mb_prio = mb_prio * epopt_weights[idx, None]
 
             mb_obs = obs[idx]
             mb_actions = act[idx]
@@ -520,4 +535,3 @@ def load_policy(args, vec):
         policy.load_state_dict(state_dict)
 
     return policy
-

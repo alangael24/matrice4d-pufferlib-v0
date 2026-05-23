@@ -4,6 +4,9 @@
 #include <nvml.h>
 #include <nccl.h>
 
+#include <algorithm>
+#include <vector>
+
 #include <time.h>
 #include "models.cu"
 #include "ocean.cu"
@@ -185,7 +188,7 @@ void register_ppo_buffers(PPOBuffersPuf& bufs, Allocator* alloc, int N, int T, i
 // Prioritized replay over single-epoch data. These kernels are
 // the least cleaned because we will likely have a better method in 5.0
 struct PrioBuffers {
-    FloatTensor prio_probs, cdf, mb_prio;
+    FloatTensor prio_probs, cdf, mb_prio, epopt_scores, epopt_weights;
     IntTensor idx;
 };
 
@@ -194,12 +197,16 @@ void register_prio_buffers(PrioBuffers& bufs, Allocator* alloc, int B, int minib
         .prio_probs = {.shape = {B}},
         .cdf = {.shape = {B}},
         .mb_prio = {.shape = {minibatch_segments}},
+        .epopt_scores = {.shape = {B}},
+        .epopt_weights = {.shape = {B}},
         .idx = {.shape = {minibatch_segments}},
     };
     alloc_register(alloc, &bufs.prio_probs);
     alloc_register(alloc, &bufs.cdf);
     alloc_register(alloc, &bufs.idx);
     alloc_register(alloc, &bufs.mb_prio);
+    alloc_register(alloc, &bufs.epopt_scores);
+    alloc_register(alloc, &bufs.epopt_weights);
 }
 
 // Slice: select dim0 index t, then narrow dim0 from start for count.
@@ -270,6 +277,8 @@ typedef struct {
     // Priority
     float prio_alpha;
     float prio_beta0;
+    float epopt_alpha;
+    float epopt_quantile;
     // Flags
     bool reset_state;
     bool deterministic_eval;
@@ -1039,16 +1048,81 @@ __global__ void compute_prio_normalize(float* prio_weights, int length) {
     }
 }
 
+__global__ void fill_float_kernel(float* dst, float value, int length) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < length) {
+        dst[idx] = value;
+    }
+}
+
+__global__ void compute_epopt_return_scores(
+        const precision_t* __restrict__ rewards,
+        float* __restrict__ scores, int B, int T) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= B) return;
+
+    float sum = 0.0f;
+    int offset = row * T;
+    for (int t = 0; t < T; t++) {
+        sum += to_float(rewards[offset + t]);
+    }
+    scores[row] = sum;
+}
+
+__global__ void set_epopt_weights(
+        const float* __restrict__ scores, float* __restrict__ weights,
+        float threshold, float tail_weight, int B) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < B) {
+        weights[idx] = scores[idx] <= threshold ? tail_weight : 1.0f;
+    }
+}
+
+void update_epopt_weights(PrecisionTensor& rewards, PrioBuffers& bufs,
+        float epopt_alpha, float epopt_quantile, cudaStream_t stream) {
+    int B = rewards.shape[0];
+    int T = rewards.shape[1];
+    int threads = 256;
+    int blocks = (B + threads - 1) / threads;
+
+    if (epopt_alpha <= 0.0f || epopt_quantile <= 0.0f || B <= 0) {
+        fill_float_kernel<<<blocks, threads, 0, stream>>>(
+            bufs.epopt_weights.data, 1.0f, B);
+        return;
+    }
+
+    epopt_quantile = fminf(fmaxf(epopt_quantile, 1.0f / (float)B), 1.0f);
+    compute_epopt_return_scores<<<blocks, threads, 0, stream>>>(
+        rewards.data, bufs.epopt_scores.data, B, T);
+
+    std::vector<float> scores(B);
+    cudaMemcpyAsync(scores.data(), bufs.epopt_scores.data,
+        B * sizeof(float), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    int tail_count = std::max(1, (int)ceilf(epopt_quantile * (float)B));
+    std::vector<float> sorted = scores;
+    std::nth_element(sorted.begin(), sorted.begin() + tail_count - 1, sorted.end());
+    float threshold = sorted[tail_count - 1];
+
+    // L = mean(all) + alpha * mean(bottom_q). In per-segment weights this is
+    // equivalent to multiplying bottom-q samples by 1 + alpha / q.
+    float tail_weight = 1.0f + epopt_alpha / epopt_quantile;
+    set_epopt_weights<<<blocks, threads, 0, stream>>>(
+        bufs.epopt_scores.data, bufs.epopt_weights.data, threshold, tail_weight, B);
+}
+
 // mb_prio[i] = pow(total_agents * prio_probs[idx[i]], -anneal_beta)
 __global__ void compute_prio_imp_weights(
         const int* __restrict__ indices,
         const float* __restrict__ prio_probs,
+        const float* __restrict__ epopt_weights,
         float* mb_prio, int total_agents,
         float anneal_beta, int minibatch_segments) {
     int tx = threadIdx.x + blockIdx.x * blockDim.x;
     if (tx < minibatch_segments) {
         float value = prio_probs[indices[tx]] * (float)total_agents;
-        mb_prio[tx] = __powf(value, -anneal_beta);
+        mb_prio[tx] = __powf(value, -anneal_beta) * epopt_weights[indices[tx]];
     }
 }
 
@@ -1112,7 +1186,7 @@ void prio_replay_cuda(PrecisionTensor& advantages, float prio_alpha,
 
     int p3_blocks = (minibatch_segments + PRIO_BLOCK_SIZE - 1) / PRIO_BLOCK_SIZE;
     compute_prio_imp_weights<<<p3_blocks, PRIO_BLOCK_SIZE, 0, stream>>>(
-        bufs.idx.data, bufs.prio_probs.data,
+        bufs.idx.data, bufs.prio_probs.data, bufs.epopt_weights.data,
         bufs.mb_prio.data, total_agents, anneal_beta, minibatch_segments);
 }
 
@@ -1353,6 +1427,9 @@ void train_impl(PuffeRL& pufferl) {
     // We hard-clamp rewards to -1, 1. Our envs are mostly designed to respect this range
     clamp_precision_kernel<<<grid_size(numel(rollouts.rewards.shape)), BLOCK_SIZE, 0, train_stream>>>(
         rollouts.rewards.data, -1.0f, 1.0f, numel(rollouts.rewards.shape));
+
+    update_epopt_weights(rollouts.rewards, pufferl.prio_bufs,
+        hypers.epopt_alpha, hypers.epopt_quantile, train_stream);
 
     // Set importance weights to 1.0
     fill_precision_kernel<<<grid_size(numel(rollouts.ratio.shape)), BLOCK_SIZE, 0, train_stream>>>(
