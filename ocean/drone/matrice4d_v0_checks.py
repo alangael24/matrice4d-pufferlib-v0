@@ -110,7 +110,9 @@ def main() -> int:
 
     binding_text = BINDING.read_text(encoding="utf-8", errors="replace")
     drone_h_text = DRONE_H.read_text(encoding="utf-8", errors="replace")
-    if "#define OBS_SIZE 23" not in binding_text or "observations + i*23" not in drone_h_text:
+    obs_macro_ok = "#define OBS_SIZE DRONE_OBS_SIZE" in binding_text or "#define OBS_SIZE 23" in binding_text
+    stride_ok = "observations + i * DRONE_OBS_SIZE" in drone_h_text or "observations + i*23" in drone_h_text
+    if not obs_macro_ok or not stride_ok:
         raise AssertionError("OBS_SIZE and drone observation stride diverged")
     if drone_h_text.count("finalize_reset_potential(env, agent);") != 2:
         raise AssertionError("reset potential must be finalized after set_target in c_reset and c_step")

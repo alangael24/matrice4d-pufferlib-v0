@@ -1,7 +1,7 @@
 #include "drone.h"
 #include "render.h"
 
-#define OBS_SIZE 23
+#define OBS_SIZE DRONE_OBS_SIZE
 #define NUM_ATNS 4
 #define ACT_SIZES {1, 1, 1, 1}
 #define OBS_TENSOR_T FloatTensor
@@ -91,6 +91,20 @@ void my_init(Env* env, Dict* kwargs) {
     env->reset_vel_max = dict_get(kwargs, "reset_vel_max")->value;
     env->action_latency = dict_get(kwargs, "action_latency")->value;
     env->sensor_noise = dict_get(kwargs, "sensor_noise")->value;
+    env->camera_3x1_enabled = dict_get_default(kwargs, "camera_3x1_enabled", 0.0f);
+    env->camera_fov_x = dict_get_default(kwargs, "camera_fov_x", 120.0f);
+    env->camera_fov_y = dict_get_default(kwargs, "camera_fov_y", 80.0f);
+    env->camera_gate_gain = dict_get_default(kwargs, "camera_gate_gain", 1.0f);
+    env->camera_bg = dict_get_default(kwargs, "camera_bg", 0.02f);
+    env->camera_noise = dict_get_default(kwargs, "camera_noise", 0.0f);
+    env->race_gate_spacing = dict_get_default(kwargs, "race_gate_spacing", 10.0f);
+    env->race_lateral_range = dict_get_default(kwargs, "race_lateral_range", 4.0f);
+    env->race_vertical_range = dict_get_default(kwargs, "race_vertical_range", 2.0f);
+    env->race_spawn_dist = dict_get_default(kwargs, "race_spawn_dist", 8.0f);
+    env->race_spawn_jitter = dict_get_default(kwargs, "race_spawn_jitter", 1.0f);
+    env->race_gate_reward = dict_get_default(kwargs, "race_gate_reward", 5.0f);
+    env->race_gate_hit_penalty = dict_get_default(kwargs, "race_gate_hit_penalty", 2.0f);
+    env->race_progress_scale = dict_get_default(kwargs, "race_progress_scale", 0.10f);
     init(env);
 }
 

@@ -111,6 +111,20 @@ struct DroneEnv {
     float reset_vel_max;
     float action_latency;
     float sensor_noise;
+    float camera_3x1_enabled;
+    float camera_fov_x;
+    float camera_fov_y;
+    float camera_gate_gain;
+    float camera_bg;
+    float camera_noise;
+    float race_gate_spacing;
+    float race_lateral_range;
+    float race_vertical_range;
+    float race_spawn_dist;
+    float race_spawn_jitter;
+    float race_gate_reward;
+    float race_gate_hit_penalty;
+    float race_progress_scale;
 };
 
 void init(DroneEnv* env) {
@@ -278,13 +292,76 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     agent->rings_passed = 0.0f;
 }
 
+static inline float smoothstep01(float x) {
+    x = clampf(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+static inline float soft_band_weight(float err, float inner, float outer) {
+    err = fabsf(err);
+    outer = fmaxf(outer, inner + 1e-4f);
+    if (err <= inner) return 1.0f;
+    if (err >= outer) return 0.0f;
+    return 1.0f - smoothstep01((err - inner) / (outer - inner));
+}
+
+static inline void append_camera_3x1_observations(DroneEnv* env, Drone* agent, float* obs) {
+    int base = DRONE_BASE_OBS_SIZE;
+    for (int i = 0; i < DRONE_CAMERA_3X1_RGB_SIZE; i++) obs[base + i] = 0.0f;
+    if (env->camera_3x1_enabled <= 0.0f || agent->target == NULL) return;
+
+    Quat q_inv = quat_inverse(agent->state.quat);
+    Vec3 to_target_world = sub3(agent->target->pos, agent->state.pos);
+    Vec3 to_target = quat_rotate(q_inv, to_target_world);
+    float dist = fmaxf(norm3(to_target), 1e-3f);
+
+    // Body +x is the forward/camera axis for this branch.
+    if (to_target.x <= 0.0f) return;
+
+    float fov_x = clampf(env->camera_fov_x, 10.0f, 170.0f) * ((float)M_PI / 180.0f);
+    float fov_y = clampf(env->camera_fov_y, 10.0f, 170.0f) * ((float)M_PI / 180.0f);
+    float gate_radius = agent->target->radius > 0.0f ? agent->target->radius : RING_RADIUS;
+    float gate_ang = atan2f(gate_radius, dist);
+    float az = atan2f(to_target.y, to_target.x);
+    float el = atan2f(to_target.z, sqrtf(to_target.x * to_target.x + to_target.y * to_target.y));
+    float v_weight = soft_band_weight(el, 0.5f * fov_y + gate_ang, 0.5f * fov_y + 2.0f * gate_ang + 0.02f);
+    if (v_weight <= 0.0f) return;
+
+    float half_pix = fov_x / 6.0f;
+    float gain = fmaxf(env->camera_gate_gain, 0.0f);
+    float bg = clampf(env->camera_bg, 0.0f, 1.0f);
+    float noise = fminf(fabsf(env->camera_noise), 1.0f);
+    float vertical_code = clampf(0.5f + 0.5f * el / fmaxf(0.5f * fov_y, 1e-4f), 0.0f, 1.0f);
+
+    for (int px = 0; px < 3; px++) {
+        float center = ((float)px - 1.0f) * (fov_x / 3.0f);
+        float h_weight = soft_band_weight(az - center, half_pix + gate_ang, half_pix + 2.0f * gate_ang + 0.02f);
+        float signal = clampf(gain * h_weight * v_weight, 0.0f, 1.0f);
+
+        // Raw RGB-style active gate: left side reddish, right side greenish,
+        // blue channel carries weak vertical color variation.
+        float r = bg + signal * (px == 0 ? 1.00f : (px == 1 ? 0.70f : 0.25f));
+        float g = bg + signal * (px == 2 ? 1.00f : (px == 1 ? 0.70f : 0.25f));
+        float b = bg + signal * (0.25f + 0.75f * vertical_code);
+        if (noise > 0.0f) {
+            r += rndf(-noise, noise, &env->rng);
+            g += rndf(-noise, noise, &env->rng);
+            b += rndf(-noise, noise, &env->rng);
+        }
+        obs[base + px * 3 + 0] = clampf(r, 0.0f, 1.0f);
+        obs[base + px * 3 + 1] = clampf(g, 0.0f, 1.0f);
+        obs[base + px * 3 + 2] = clampf(b, 0.0f, 1.0f);
+    }
+}
+
 void compute_observations(DroneEnv* env) {
     for (int i = 0; i < env->num_agents; i++) {
-        float* obs = env->observations + i*23;
+        float* obs = env->observations + i * DRONE_OBS_SIZE;
         compute_drone_observations(&env->agents[i], obs);
+        append_camera_3x1_observations(env, &env->agents[i], obs);
         if (env->sensor_noise > 0.0f) {
             float noise = fminf(fabsf(env->sensor_noise), 1.0f);
-            for (int j = 0; j < 23; j++) {
+            for (int j = 0; j < DRONE_BASE_OBS_SIZE; j++) {
                 obs[j] = clampf(obs[j] + rndf(-noise, noise, &env->rng), -2.0f, 2.0f);
             }
         }
@@ -371,6 +448,28 @@ static inline DomainRandomization env_domain_randomization(DroneEnv* env) {
     };
 }
 
+static inline void reset_camera_race_track(DroneEnv* env) {
+    float spacing = fmaxf(env->race_gate_spacing, 2.5f * RING_RADIUS);
+    float lateral = fmaxf(env->race_lateral_range, 0.0f);
+    float vertical = fmaxf(env->race_vertical_range, 0.0f);
+    float y = 0.0f;
+    float z = 0.0f;
+
+    for (int i = 0; i < env->max_rings; i++) {
+        if (i > 0) {
+            y = clampf(y + rndf(-0.5f * lateral, 0.5f * lateral, &env->rng), -lateral, lateral);
+            z = clampf(z + rndf(-0.5f * vertical, 0.5f * vertical, &env->rng), -vertical, vertical);
+        }
+        env->ring_buffer[i] = (Target){
+            .pos = (Vec3){spacing * (float)(i + 1), y, z},
+            .vel = (Vec3){0.0f, 0.0f, 0.0f},
+            .orientation = (Quat){1.0f, 0.0f, 0.0f, 0.0f},
+            .normal = (Vec3){1.0f, 0.0f, 0.0f},
+            .radius = RING_RADIUS,
+        };
+    }
+}
+
 void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->episode_return = 0.0f;
     agent->episode_length = 0;
@@ -444,13 +543,17 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     }
 
     if (env->task == RACE) {
-        while (norm3(sub3(agent->state.pos, env->ring_buffer[0].pos)) < 2.0f * RING_RADIUS) {
-            agent->state.pos = (Vec3){
-                rndf(-MARGIN_X * pos_scale, MARGIN_X * pos_scale, &env->rng),
-                rndf(-MARGIN_Y * pos_scale, MARGIN_Y * pos_scale, &env->rng),
-                rndf(-MARGIN_Z * pos_scale, MARGIN_Z * pos_scale, &env->rng)
-            };
-        }
+        agent->buffer_idx = 0;
+        Target* first_gate = &env->ring_buffer[0];
+        float spawn_dist = fmaxf(env->race_spawn_dist, 2.0f * RING_RADIUS);
+        float jitter = fmaxf(env->race_spawn_jitter, 0.0f);
+        Vec3 spawn_offset = scalmul3(first_gate->normal, -spawn_dist);
+        agent->state.pos = add3(first_gate->pos, spawn_offset);
+        agent->state.pos.y += rndf(-jitter, jitter, &env->rng);
+        agent->state.pos.z += rndf(-0.5f * jitter, 0.5f * jitter, &env->rng);
+        agent->state.quat = (Quat){1.0f, 0.0f, 0.0f, 0.0f};
+        agent->state.vel = (Vec3){0.0f, 0.0f, 0.0f};
+        agent->state.omega = (Vec3){0.0f, 0.0f, 0.0f};
     }
 
     agent->prev_pos = agent->state.pos;
@@ -463,7 +566,7 @@ static inline void finalize_reset_potential(DroneEnv* env, Drone* agent) {
 
 void c_reset(DroneEnv* env) {
     if (env->task == RACE) {
-        reset_rings(&env->rng, env->ring_buffer, env->max_rings);
+        reset_camera_race_track(env);
     }
 
     for (int i = 0; i < env->num_agents; i++) {
@@ -505,6 +608,9 @@ void c_step(DroneEnv* env) {
         move_drone(agent, delayed_actions);
         agent->episode_length++;
 
+        int ring_result = env->task == RACE ? check_ring(agent, agent->target) : 0;
+        bool gate_passed = ring_result > 0;
+        bool ring_collision = ring_result < 0;
         bool oob = norm3(sub3(agent->target->pos, agent->state.pos)) > env->oob_radius;
         bool timeout = (agent->episode_length >= HORIZON);
 
@@ -526,6 +632,19 @@ void c_step(DroneEnv* env) {
         float r_shaping = env->alpha_shaping * (curr - agent->prev_potential);
         float r_omega = r_omega_xy + r_omega_z;
         float r_terminal = 0.0f;
+        if (env->task == RACE) {
+            float prev_plane = dot3(sub3(agent->prev_pos, agent->target->pos), agent->target->normal);
+            float curr_plane = dot3(sub3(agent->state.pos, agent->target->pos), agent->target->normal);
+            r_dist = 0.25f * env->alpha_dist * (prev_dist - curr_dist)
+                   + env->race_progress_scale * (curr_plane - prev_plane);
+            r_hover = 0.0f;
+            r_shaping = 0.0f;
+            if (gate_passed) {
+                r_terminal += env->race_gate_reward;
+            } else if (ring_collision) {
+                r_terminal -= env->race_gate_hit_penalty;
+            }
+        }
         float r_action_delta = -env->alpha_action_delta * action_delta_mean
                              -env->alpha_reset_action_delta * reset_action_jump;
         float reward = r_dist + r_hover + r_shaping + r_omega + r_terminal + r_action_delta;
@@ -547,7 +666,17 @@ void c_step(DroneEnv* env) {
         agent->episode_return += reward;
         env->rewards[i] = reward;
 
-        bool reset = oob || timeout;
+        if (gate_passed) {
+            agent->rings_passed += 1;
+            agent->buffer_idx = (agent->buffer_idx + 1) % agent->buffer_size;
+            set_target(&env->rng, env->task, env->agents, i, env->num_agents, env->hover_target_dist);
+            agent->prev_potential = hover_potential(agent, env->hover_dist, env->hover_omega, env->hover_vel);
+        }
+        if (ring_collision) {
+            agent->collisions += 1.0f;
+        }
+
+        bool reset = oob || timeout || ring_collision;
         env->terminals[i] = reset ? 1.0f : 0.0f;
 
         if (reset) {

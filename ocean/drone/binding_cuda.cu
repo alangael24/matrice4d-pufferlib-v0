@@ -15,7 +15,9 @@ typedef __nv_bfloat16 precision_t;
 
 #include "vecenv.h"
 
-#define DRONE_OBS_SIZE 23
+#define DRONE_BASE_OBS_SIZE 23
+#define DRONE_CAMERA_3X1_RGB_SIZE 9
+#define DRONE_OBS_SIZE (DRONE_BASE_OBS_SIZE + DRONE_CAMERA_3X1_RGB_SIZE)
 #define DRONE_NUM_ATNS 4
 #define DRONE_HORIZON 1024
 
@@ -31,6 +33,8 @@ typedef __nv_bfloat16 precision_t;
 #define DRONE_MARGIN_Y (DRONE_GRID_Y - 1.0f)
 #define DRONE_MARGIN_Z (DRONE_GRID_Z - 1.0f)
 #define DRONE_PI 3.14159265358979323846f
+#define DRONE_TASK_RACE 7
+#define DRONE_RING_RADIUS 2.0f
 
 #define BASE_MASS 1.850f
 #define BASE_IXX 4.0250e-2f
@@ -135,10 +139,12 @@ struct DroneCudaState {
 
     float3 target_pos;
     float3 target_normal;
+    float target_radius;
     float3 prev_pos;
     float prev_potential;
     float episode_return;
     int episode_length;
+    int rings_passed;
 
     float hover_score;
     float hover_ema;
@@ -313,6 +319,11 @@ struct DroneCudaCtx {
     float normalized_thrust_min, normalized_thrust_max;
     float reset_pos_scale, reset_yaw_range, reset_vel_max;
     float sensor_noise;
+    float camera_3x1_enabled, camera_fov_x, camera_fov_y;
+    float camera_gate_gain, camera_bg, camera_noise;
+    float race_gate_spacing, race_lateral_range, race_vertical_range;
+    float race_spawn_dist, race_spawn_jitter;
+    float race_gate_reward, race_gate_hit_penalty, race_progress_scale;
 
     DroneCudaState* states;
     DroneCudaParams* params;
@@ -1502,6 +1513,118 @@ __device__ void set_target_hover_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
                                 clampf_dev(p.y, -DRONE_MARGIN_Y, DRONE_MARGIN_Y),
                                 clampf_dev(p.z, -DRONE_MARGIN_Z, DRONE_MARGIN_Z));
     s->target_normal = make_float3(0.0f, 0.0f, 1.0f);
+    s->target_radius = 0.0f;
+}
+
+__device__ __forceinline__ float smoothstep01_dev(float x) {
+    x = clampf_dev(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+__device__ __forceinline__ float soft_band_weight_dev(float err, float inner, float outer) {
+    err = fabsf(err);
+    outer = fmaxf(outer, inner + 1e-4f);
+    if (err <= inner) return 1.0f;
+    if (err >= outer) return 0.0f;
+    return 1.0f - smoothstep01_dev((err - inner) / (outer - inner));
+}
+
+__device__ void set_next_race_target_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
+                                         curandStatePhilox4_32_10_t* rng) {
+    float spacing = fmaxf(cfg.race_gate_spacing, 2.5f * DRONE_RING_RADIUS);
+    float lateral = fmaxf(cfg.race_lateral_range, 0.0f);
+    float vertical = fmaxf(cfg.race_vertical_range, 0.0f);
+    float y = clampf_dev(s->target_pos.y + rndf_dev(-0.5f * lateral, 0.5f * lateral, rng),
+                         -lateral, lateral);
+    float z = clampf_dev(s->target_pos.z + rndf_dev(-0.5f * vertical, 0.5f * vertical, rng),
+                         -vertical, vertical);
+    s->target_pos = make_float3(s->pos.x + spacing, y, z);
+    s->target_normal = make_float3(1.0f, 0.0f, 0.0f);
+    s->target_radius = DRONE_RING_RADIUS;
+}
+
+__device__ void reset_race_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
+                               curandStatePhilox4_32_10_t* rng) {
+    float spawn_dist = fmaxf(cfg.race_spawn_dist, 2.0f * DRONE_RING_RADIUS);
+    float jitter = fmaxf(cfg.race_spawn_jitter, 0.0f);
+    s->pos = make_float3(-spawn_dist,
+                         rndf_dev(-jitter, jitter, rng),
+                         rndf_dev(-0.5f * jitter, 0.5f * jitter, rng));
+    s->vel = make_float3(0.0f, 0.0f, 0.0f);
+    s->omega = make_float3(0.0f, 0.0f, 0.0f);
+    s->quat = quat_dev(1.0f, 0.0f, 0.0f, 0.0f);
+    s->target_pos = make_float3(0.0f, 0.0f, 0.0f);
+    s->target_normal = make_float3(1.0f, 0.0f, 0.0f);
+    s->target_radius = DRONE_RING_RADIUS;
+    s->rings_passed = 0;
+}
+
+__device__ int check_ring_dev(const DroneCudaState* s) {
+    float prev_dot = dot3_dev(sub3_dev(s->prev_pos, s->target_pos), s->target_normal);
+    float new_dot = dot3_dev(sub3_dev(s->pos, s->target_pos), s->target_normal);
+    bool valid_dir = prev_dot < 0.0f && new_dot > 0.0f;
+    bool invalid_dir = prev_dot > 0.0f && new_dot < 0.0f;
+    if (!(valid_dir || invalid_dir)) return 0;
+
+    float3 dir = sub3_dev(s->pos, s->prev_pos);
+    float denom = dot3_dev(s->target_normal, dir);
+    if (fabsf(denom) < 1e-9f) return 0;
+    float t = -prev_dot / denom;
+    float3 intersection = add3_dev(s->prev_pos, scale3_dev(dir, t));
+    float dist = norm3_dev(sub3_dev(intersection, s->target_pos));
+    float radius = s->target_radius > 0.0f ? s->target_radius : DRONE_RING_RADIUS;
+    if (dist < radius - 0.5f && valid_dir) return 1;
+    if (dist < radius + 0.5f) return -1;
+    return 0;
+}
+
+__device__ void append_camera_3x1_obs_dev(const DroneCudaState* s, const DroneCudaCtx& cfg,
+                                          curandStatePhilox4_32_10_t* rng, float* obs) {
+    int base = DRONE_BASE_OBS_SIZE;
+    #pragma unroll
+    for (int i = 0; i < DRONE_CAMERA_3X1_RGB_SIZE; i++) obs[base + i] = 0.0f;
+    if (cfg.camera_3x1_enabled <= 0.0f) return;
+
+    float4 q_inv = quat_inverse_dev(s->quat);
+    float3 to_world = sub3_dev(s->target_pos, s->pos);
+    float3 to_target = quat_rotate_dev(q_inv, to_world);
+    float dist = fmaxf(norm3_dev(to_target), 1e-3f);
+    if (to_target.x <= 0.0f) return;
+
+    float fov_x = clampf_dev(cfg.camera_fov_x, 10.0f, 170.0f) * (DRONE_PI / 180.0f);
+    float fov_y = clampf_dev(cfg.camera_fov_y, 10.0f, 170.0f) * (DRONE_PI / 180.0f);
+    float radius = s->target_radius > 0.0f ? s->target_radius : DRONE_RING_RADIUS;
+    float gate_ang = atan2f(radius, dist);
+    float az = atan2f(to_target.y, to_target.x);
+    float el = atan2f(to_target.z, sqrtf(to_target.x * to_target.x + to_target.y * to_target.y));
+    float v_weight = soft_band_weight_dev(el, 0.5f * fov_y + gate_ang,
+                                          0.5f * fov_y + 2.0f * gate_ang + 0.02f);
+    if (v_weight <= 0.0f) return;
+
+    float half_pix = fov_x / 6.0f;
+    float gain = fmaxf(cfg.camera_gate_gain, 0.0f);
+    float bg = clampf_dev(cfg.camera_bg, 0.0f, 1.0f);
+    float noise = fminf(fabsf(cfg.camera_noise), 1.0f);
+    float vertical_code = clampf_dev(0.5f + 0.5f * el / fmaxf(0.5f * fov_y, 1e-4f), 0.0f, 1.0f);
+
+    #pragma unroll
+    for (int px = 0; px < 3; px++) {
+        float center = ((float)px - 1.0f) * (fov_x / 3.0f);
+        float h_weight = soft_band_weight_dev(az - center, half_pix + gate_ang,
+                                              half_pix + 2.0f * gate_ang + 0.02f);
+        float signal = clampf_dev(gain * h_weight * v_weight, 0.0f, 1.0f);
+        float r = bg + signal * (px == 0 ? 1.00f : (px == 1 ? 0.70f : 0.25f));
+        float g = bg + signal * (px == 2 ? 1.00f : (px == 1 ? 0.70f : 0.25f));
+        float b = bg + signal * (0.25f + 0.75f * vertical_code);
+        if (noise > 0.0f) {
+            r += rndf_dev(-noise, noise, rng);
+            g += rndf_dev(-noise, noise, rng);
+            b += rndf_dev(-noise, noise, rng);
+        }
+        obs[base + px * 3 + 0] = clampf_dev(r, 0.0f, 1.0f);
+        obs[base + px * 3 + 1] = clampf_dev(g, 0.0f, 1.0f);
+        obs[base + px * 3 + 2] = clampf_dev(b, 0.0f, 1.0f);
+    }
 }
 
 __device__ void reset_one_dev(DroneCudaState* s, DroneCudaParams* p, const DroneCudaCtx& cfg,
@@ -1538,7 +1661,11 @@ __device__ void reset_one_dev(DroneCudaState* s, DroneCudaParams* p, const Drone
         float speed = cfg.reset_vel_max * cbrtf(rndf_dev(0.0f, 1.0f, rng));
         s->vel = scale3_dev(dir, speed);
     }
-    set_target_hover_dev(s, cfg, rng);
+    if (cfg.task == DRONE_TASK_RACE) {
+        reset_race_dev(s, cfg, rng);
+    } else {
+        set_target_hover_dev(s, cfg, rng);
+    }
     s->pal_probe_active = curand_uniform(rng) <= clampf_dev(cfg.pal_probe_prob, 0.0f, 1.0f);
     s->prev_pos = s->pos;
     s->prev_potential = hover_potential_dev(s, cfg);
@@ -1602,11 +1729,12 @@ __device__ void compute_obs_dev(const DroneCudaState* s, const DroneCudaParams* 
     obs[idx++] = s->rpms[1] / p->max_rpm;
     obs[idx++] = s->rpms[2] / p->max_rpm;
     obs[idx++] = s->rpms[3] / p->max_rpm;
+    append_camera_3x1_obs_dev(s, cfg, rng, obs);
 
     if (cfg.sensor_noise > 0.0f) {
         float noise = fminf(fabsf(cfg.sensor_noise), 1.0f);
         #pragma unroll
-        for (int i = 0; i < DRONE_OBS_SIZE; i++) {
+        for (int i = 0; i < DRONE_BASE_OBS_SIZE; i++) {
             obs[i] = clampf_dev(obs[i] + rndf_dev(-noise, noise, rng), -2.0f, 2.0f);
         }
     }
@@ -1674,6 +1802,7 @@ __device__ void log_done_dev(DroneCudaLog* log, const DroneCudaState* s,
     atomicAdd(&log->episode_length, (float)s->episode_length);
     atomicAdd(&log->oob, oob ? 1.0f : 0.0f);
     atomicAdd(&log->timeout, timeout ? 1.0f : 0.0f);
+    atomicAdd(&log->rings_passed, (float)s->rings_passed);
     atomicAdd(&log->score, s->hover_score);
     atomicAdd(&log->perf, s->hover_ema);
     atomicAdd(&log->ema_dist, s->ema_dist);
@@ -1817,6 +1946,9 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
     move_drone_dev(&s, &p, delayed_actions);
     s.episode_length++;
 
+    int ring_result = cfg.task == DRONE_TASK_RACE ? check_ring_dev(&s) : 0;
+    bool gate_passed = ring_result > 0;
+    bool ring_collision = ring_result < 0;
     float curr_dist = norm3_dev(sub3_dev(s.target_pos, s.pos));
     float prev_dist = norm3_dev(sub3_dev(s.target_pos, s.prev_pos));
     float omega = norm3_dev(s.omega);
@@ -1830,9 +1962,23 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
     float r_hover = cfg.alpha_hover * curr;
     float r_shaping = cfg.alpha_shaping * (curr - s.prev_potential);
     float r_omega = r_omega_xy + r_omega_z;
+    float r_terminal = 0.0f;
+    if (cfg.task == DRONE_TASK_RACE) {
+        float prev_plane = dot3_dev(sub3_dev(s.prev_pos, s.target_pos), s.target_normal);
+        float curr_plane = dot3_dev(sub3_dev(s.pos, s.target_pos), s.target_normal);
+        r_dist = 0.25f * cfg.alpha_dist * (prev_dist - curr_dist)
+               + cfg.race_progress_scale * (curr_plane - prev_plane);
+        r_hover = 0.0f;
+        r_shaping = 0.0f;
+        if (gate_passed) {
+            r_terminal += cfg.race_gate_reward;
+        } else if (ring_collision) {
+            r_terminal -= cfg.race_gate_hit_penalty;
+        }
+    }
     float r_action_delta = -cfg.alpha_action_delta * action_delta_mean
                          -cfg.alpha_reset_action_delta * reset_action_jump;
-    float reward = r_dist + r_hover + r_shaping + r_omega + r_action_delta;
+    float reward = r_dist + r_hover + r_shaping + r_omega + r_terminal + r_action_delta;
     s.prev_potential = curr;
 
     float h = check_hover_dev(&s, cfg);
@@ -1848,9 +1994,15 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
                             r_omega_xy, r_omega_z, action_delta_mean, reset_action_jump);
     s.episode_return += reward;
 
+    if (gate_passed) {
+        s.rings_passed += 1;
+        set_next_race_target_dev(&s, cfg, &r);
+        s.prev_potential = hover_potential_dev(&s, cfg);
+    }
+
     bool oob = curr_dist > cfg.oob_radius;
     bool timeout = s.episode_length >= cfg.horizon;
-    bool done = oob || timeout;
+    bool done = oob || timeout || ring_collision;
     rewards[i] = reward;
     terminals[i] = done ? 1.0f : 0.0f;
 
@@ -1945,6 +2097,20 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.reset_yaw_range = dict_float(env_kwargs, "reset_yaw_range", DRONE_PI);
     ctx.reset_vel_max = dict_float(env_kwargs, "reset_vel_max", 0.0f);
     ctx.sensor_noise = dict_float(env_kwargs, "sensor_noise", 0.0f);
+    ctx.camera_3x1_enabled = dict_float(env_kwargs, "camera_3x1_enabled", 0.0f);
+    ctx.camera_fov_x = dict_float(env_kwargs, "camera_fov_x", 120.0f);
+    ctx.camera_fov_y = dict_float(env_kwargs, "camera_fov_y", 80.0f);
+    ctx.camera_gate_gain = dict_float(env_kwargs, "camera_gate_gain", 1.0f);
+    ctx.camera_bg = dict_float(env_kwargs, "camera_bg", 0.02f);
+    ctx.camera_noise = dict_float(env_kwargs, "camera_noise", 0.0f);
+    ctx.race_gate_spacing = dict_float(env_kwargs, "race_gate_spacing", 10.0f);
+    ctx.race_lateral_range = dict_float(env_kwargs, "race_lateral_range", 4.0f);
+    ctx.race_vertical_range = dict_float(env_kwargs, "race_vertical_range", 2.0f);
+    ctx.race_spawn_dist = dict_float(env_kwargs, "race_spawn_dist", 8.0f);
+    ctx.race_spawn_jitter = dict_float(env_kwargs, "race_spawn_jitter", 1.0f);
+    ctx.race_gate_reward = dict_float(env_kwargs, "race_gate_reward", 5.0f);
+    ctx.race_gate_hit_penalty = dict_float(env_kwargs, "race_gate_hit_penalty", 2.0f);
+    ctx.race_progress_scale = dict_float(env_kwargs, "race_progress_scale", 0.10f);
     ctx.action_latency_steps = latency_steps_from_seconds(dict_float(env_kwargs, "action_latency", 0.0f));
     (void)vec_kwargs;
     return ctx;
@@ -2024,8 +2190,8 @@ static DroneCudaAdrState make_host_adr_state(const DroneCudaCtx* ctx) {
 extern "C" void cuda_env_init(StaticVec* vec, Dict* vec_kwargs, Dict* env_kwargs) {
     DroneCudaCtx* ctx = (DroneCudaCtx*)calloc(1, sizeof(DroneCudaCtx));
     *ctx = make_host_ctx(vec, vec_kwargs, env_kwargs);
-    if (ctx->task != 1) {
-        fprintf(stderr, "drone CUDA env currently implements HOVER only; got task=%d\n", ctx->task);
+    if (ctx->task != 1 && ctx->task != DRONE_TASK_RACE) {
+        fprintf(stderr, "drone CUDA env currently implements HOVER/RACE only; got task=%d\n", ctx->task);
     }
     CUDA_ENV_CHECK(cudaMalloc((void**)&ctx->states,
                               (size_t)ctx->total_agents * sizeof(DroneCudaState)));
