@@ -105,6 +105,16 @@ void my_init(Env* env, Dict* kwargs) {
     env->minimal_vision_spawn_visible_target = dict_get_default(kwargs, "minimal_vision_spawn_visible_target", 0.0f);
     env->race_track_mode = dict_get_default(kwargs, "race_track_mode", 0.0f);
     env->race_segment_mode = dict_get_default(kwargs, "race_segment_mode", 0.0f);
+    env->race_isb_enabled = dict_get_default(kwargs, "race_isb_enabled", 0.0f);
+    env->race_isb_prob = dict_get_default(kwargs, "race_isb_prob", 0.0f);
+    env->race_isb_margin = dict_get_default(kwargs, "race_isb_margin", 0.8f);
+    env->race_isb_pos_xy = dict_get_default(kwargs, "race_isb_pos_xy", 0.45f);
+    env->race_isb_z = dict_get_default(kwargs, "race_isb_z", 0.25f);
+    env->race_isb_angle = dict_get_default(kwargs, "race_isb_angle", 0.18f);
+    env->race_isb_vel = dict_get_default(kwargs, "race_isb_vel", 0.60f);
+    env->race_isb_omega = dict_get_default(kwargs, "race_isb_omega", 0.60f);
+    env->race_hard_gate_idx = dict_get_default(kwargs, "race_hard_gate_idx", -1.0f);
+    env->race_hard_gate_prob = dict_get_default(kwargs, "race_hard_gate_prob", 0.0f);
     env->race_course_yaw_delta = dict_get_default(kwargs, "race_course_yaw_delta", 0.0f);
     env->race_course_pitch_delta = dict_get_default(kwargs, "race_course_pitch_delta", 0.0f);
     env->race_course_pitch_limit = dict_get_default(kwargs, "race_course_pitch_limit", 0.0f);

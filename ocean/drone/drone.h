@@ -123,6 +123,16 @@ struct DroneEnv {
     float minimal_vision_spawn_visible_target;
     float race_track_mode;
     float race_segment_mode;
+    float race_isb_enabled;
+    float race_isb_prob;
+    float race_isb_margin;
+    float race_isb_pos_xy;
+    float race_isb_z;
+    float race_isb_angle;
+    float race_isb_vel;
+    float race_isb_omega;
+    float race_hard_gate_idx;
+    float race_hard_gate_prob;
     float race_course_yaw_delta;
     float race_course_pitch_delta;
     float race_course_pitch_limit;
@@ -876,6 +886,88 @@ static inline int race_random_target_idx(DroneEnv* env, int n) {
     return idx;
 }
 
+static inline int race_segment_target_idx(DroneEnv* env, int n) {
+    if (n <= 1) return 0;
+    int hard_idx = (int)floorf(env->race_hard_gate_idx + 0.5f);
+    float hard_prob = clampf(env->race_hard_gate_prob, 0.0f, 1.0f);
+    if (hard_idx >= 0 && hard_idx < n && rndf(0.0f, 1.0f, &env->rng) < hard_prob) {
+        return hard_idx;
+    }
+    int idx = (int)floorf(rndf(0.0f, (float)n, &env->rng));
+    if (idx < 0) idx = 0;
+    if (idx >= n) idx = n - 1;
+    return idx;
+}
+
+static inline void race_isb_push(DroneEnv* env, Drone* agent, int target_idx, float pass_margin) {
+    if (!(env->race_isb_enabled > 0.0f)) return;
+    if (env->race_track_mode >= 2.0f) return;
+    if (target_idx < 0 || target_idx >= DRONE_GATE_DEBUG_MAX) return;
+    float margin_min = env->race_isb_margin > 0.0f ? env->race_isb_margin : 0.8f;
+    if (pass_margin < margin_min) return;
+    int slot = agent->race_isb_cursor[target_idx];
+    if (slot < 0 || slot >= DRONE_ISB_CAPACITY) slot = 0;
+    agent->race_isb_states[target_idx][slot] = agent->state;
+    agent->race_isb_cursor[target_idx] = (slot + 1) % DRONE_ISB_CAPACITY;
+    if (agent->race_isb_count[target_idx] < DRONE_ISB_CAPACITY) {
+        agent->race_isb_count[target_idx] += 1;
+    }
+}
+
+static inline float race_pass_margin(Drone* agent, int gate_idx) {
+    if (gate_idx < 0 || gate_idx >= agent->buffer_size) return -FLT_MAX;
+    Target* gate = &agent->buffer[gate_idx];
+    Vec3 ring_pos = gate->pos;
+    Vec3 ring_normal = gate->normal;
+    float prev_dot = dot3(sub3(agent->prev_pos, ring_pos), ring_normal);
+    Vec3 dir = sub3(agent->state.pos, agent->prev_pos);
+    float denom = dot3(ring_normal, dir);
+    if (fabsf(denom) < 1e-9f) return -FLT_MAX;
+    float t = -prev_dot / denom;
+    Vec3 intersection = add3(agent->prev_pos, scalmul3(dir, t));
+    float dist = norm3(sub3(intersection, ring_pos));
+    return gate->radius - dist;
+}
+
+static inline void race_isb_perturb_state(DroneEnv* env, Drone* agent) {
+    float pos_xy = env->race_isb_pos_xy > 0.0f ? env->race_isb_pos_xy : 0.45f;
+    float pos_z = env->race_isb_z > 0.0f ? env->race_isb_z : 0.25f;
+    float angle = env->race_isb_angle > 0.0f ? env->race_isb_angle : 0.18f;
+    float vel = env->race_isb_vel > 0.0f ? env->race_isb_vel : 0.60f;
+    float omega = env->race_isb_omega > 0.0f ? env->race_isb_omega : 0.60f;
+    agent->state.pos.x += rndf(-pos_xy, pos_xy, &env->rng);
+    agent->state.pos.y += rndf(-pos_xy, pos_xy, &env->rng);
+    agent->state.pos.z += rndf(-pos_z, pos_z, &env->rng);
+    agent->state.pos = clamp_world_vec3(agent->state.pos);
+    Quat dq = race_reset_quat(rndf(-angle, angle, &env->rng),
+                              rndf(-angle, angle, &env->rng),
+                              rndf(-angle, angle, &env->rng));
+    agent->state.quat = quat_mul(dq, agent->state.quat);
+    quat_normalize(&agent->state.quat);
+    agent->state.vel.x += rndf(-vel, vel, &env->rng);
+    agent->state.vel.y += rndf(-vel, vel, &env->rng);
+    agent->state.vel.z += rndf(-vel, vel, &env->rng);
+    agent->state.omega.x += rndf(-omega, omega, &env->rng);
+    agent->state.omega.y += rndf(-omega, omega, &env->rng);
+    agent->state.omega.z += rndf(-omega, omega, &env->rng);
+}
+
+static inline bool race_try_isb_reset(DroneEnv* env, Drone* agent, int target_idx) {
+    if (!(env->race_isb_enabled > 0.0f)) return false;
+    if (env->race_track_mode >= 2.0f) return false;
+    if (target_idx < 0 || target_idx >= DRONE_GATE_DEBUG_MAX) return false;
+    if (rndf(0.0f, 1.0f, &env->rng) >= clampf(env->race_isb_prob, 0.0f, 1.0f)) return false;
+    int count = agent->race_isb_count[target_idx];
+    if (count <= 0) return false;
+    if (count > DRONE_ISB_CAPACITY) count = DRONE_ISB_CAPACITY;
+    int slot = (int)floorf(rndf(0.0f, (float)count, &env->rng));
+    if (slot >= count) slot = count - 1;
+    agent->state = agent->race_isb_states[target_idx][slot];
+    agent->buffer_idx = target_idx;
+    race_isb_perturb_state(env, agent);
+    return true;
+}
+
 static inline void race_set_state_between(DroneEnv* env, Drone* agent, int target_idx,
                                           float t_min, float t_max, float lateral,
                                           float yaw_error, float forward_speed) {
@@ -985,8 +1077,9 @@ static inline void apply_race_reset_curriculum(DroneEnv* env, Drone* agent) {
         float lateral = env->race_reset_lateral > 0.0f ? env->race_reset_lateral : 0.35f;
         float speed_min = env->race_reset_speed_min > 0.0f ? env->race_reset_speed_min : 0.3f;
         float speed_max = env->race_reset_speed_max > 0.0f ? env->race_reset_speed_max : 1.4f;
-        int start_idx = (int)floorf(rndf(0.0f, (float)agent->buffer_size, &env->rng));
-        if (start_idx >= agent->buffer_size) start_idx = agent->buffer_size - 1;
+        int target_idx = race_segment_target_idx(env, agent->buffer_size);
+        if (race_try_isb_reset(env, agent, target_idx)) return;
+        int start_idx = (target_idx - 1 + agent->buffer_size) % agent->buffer_size;
         race_set_state_segment_start(env, agent, start_idx, t_min, t_max,
                                      lateral, yaw_error, rndf(speed_min, speed_max, &env->rng));
         return;
@@ -1232,6 +1325,10 @@ void c_step(DroneEnv* env) {
                 agent->race_gate_bank += 1.0f;
                 if (current_gate_idx >= 0 && current_gate_idx < DRONE_GATE_DEBUG_MAX) {
                     agent->gate_pass_count[current_gate_idx] += 1.0f;
+                }
+                if (agent->buffer_size > 0) {
+                    int next_target = (current_gate_idx + 1) % agent->buffer_size;
+                    race_isb_push(env, agent, next_target, race_pass_margin(agent, current_gate_idx));
                 }
                 lap_complete = env->race_segment_mode >= 1.0f
                     || (agent->buffer_size > 0 && agent->buffer_idx == agent->buffer_size - 1);

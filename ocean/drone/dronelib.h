@@ -68,6 +68,7 @@
 #define DRONE_MINIMAL_VISION_OBS_SIZE (DRONE_MINIMAL_VISION_PIXELS * DRONE_MINIMAL_VISION_CHANNELS)
 #define DRONE_OBS_SIZE (DRONE_STATE_OBS_SIZE + DRONE_MINIMAL_VISION_OBS_SIZE)
 #define DRONE_GATE_DEBUG_MAX 8
+#define DRONE_ISB_CAPACITY 10
 
 // Core Parameters
 #define DT 0.002f // 500 Hz
@@ -346,6 +347,9 @@ typedef struct {
     float action_delta_sum;
     float reset_action_jump_sum;
     float reset_action_jump_count;
+    State race_isb_states[DRONE_GATE_DEBUG_MAX][DRONE_ISB_CAPACITY];
+    int race_isb_count[DRONE_GATE_DEBUG_MAX];
+    int race_isb_cursor[DRONE_GATE_DEBUG_MAX];
 } Drone;
 
 static inline float clampf(float v, float min, float max) {

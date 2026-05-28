@@ -85,6 +85,7 @@ typedef __nv_bfloat16 precision_t;
 #define DRONE_TASK_RACE 7
 #define DRONE_CUDA_MAX_RINGS 16
 #define DRONE_GATE_DEBUG_MAX 8
+#define DRONE_ISB_CAPACITY 10
 #define DRONE_RING_RADIUS 2.0f
 #define DRONE_ADR_USABLE_T2W 0
 #define DRONE_ADR_MASS 1
@@ -217,6 +218,14 @@ struct DroneCudaState {
     int pal_probe_active;
     int adr_probe_param;
     int adr_probe_side;
+};
+
+struct DroneCudaIsbState {
+    float3 pos;
+    float3 vel;
+    float4 quat;
+    float3 omega;
+    float rpms[4];
 };
 
 struct DroneCudaDerivative {
@@ -393,6 +402,16 @@ struct DroneCudaCtx {
     float minimal_vision_spawn_visible_target;
     float race_track_mode;
     float race_segment_mode;
+    float race_isb_enabled;
+    float race_isb_prob;
+    float race_isb_margin;
+    float race_isb_pos_xy;
+    float race_isb_z;
+    float race_isb_angle;
+    float race_isb_vel;
+    float race_isb_omega;
+    float race_hard_gate_idx;
+    float race_hard_gate_prob;
     float race_course_yaw_delta;
     float race_course_pitch_delta;
     float race_course_pitch_limit;
@@ -412,6 +431,9 @@ struct DroneCudaCtx {
     curandStatePhilox4_32_10_t* rng;
     DroneCudaLog* log;
     DroneCudaAdrState* adr;
+    DroneCudaIsbState* isb_states;
+    int* isb_counts;
+    int* isb_cursors;
 };
 
 static inline float dict_float(Dict* dict, const char* key, float fallback) {
@@ -1881,6 +1903,127 @@ __device__ int race_random_target_idx_dev(const DroneCudaState* s,
     return idx;
 }
 
+__device__ int race_segment_target_idx_dev(const DroneCudaState* s, const DroneCudaCtx& cfg,
+                                           curandStatePhilox4_32_10_t* rng) {
+    if (s->buffer_size <= 1) return 0;
+    int hard_idx = (int)floorf(cfg.race_hard_gate_idx + 0.5f);
+    float hard_prob = clampf_dev(cfg.race_hard_gate_prob, 0.0f, 1.0f);
+    if (hard_idx >= 0 && hard_idx < s->buffer_size && rndf_dev(0.0f, 1.0f, rng) < hard_prob) {
+        return hard_idx;
+    }
+    int idx = (int)floorf(rndf_dev(0.0f, (float)s->buffer_size, rng));
+    if (idx < 0) idx = 0;
+    if (idx >= s->buffer_size) idx = s->buffer_size - 1;
+    return idx;
+}
+
+__device__ __forceinline__ int race_isb_gate_offset_dev(int agent_idx, int gate) {
+    return agent_idx * DRONE_GATE_DEBUG_MAX + gate;
+}
+
+__device__ __forceinline__ int race_isb_state_offset_dev(int agent_idx, int gate, int slot) {
+    return (race_isb_gate_offset_dev(agent_idx, gate) * DRONE_ISB_CAPACITY) + slot;
+}
+
+__device__ float race_pass_margin_dev(const DroneCudaState* s, int gate_idx) {
+    if (gate_idx < 0 || gate_idx >= s->buffer_size) return -CUDART_INF_F;
+    float3 ring_pos = s->ring_pos[gate_idx];
+    float3 ring_normal = s->ring_normal[gate_idx];
+    float prev_dot = dot3_dev(sub3_dev(s->prev_pos, ring_pos), ring_normal);
+    float3 dir = sub3_dev(s->pos, s->prev_pos);
+    float denom = dot3_dev(ring_normal, dir);
+    if (fabsf(denom) < 1e-9f) return -CUDART_INF_F;
+    float t = -prev_dot / denom;
+    float3 intersection = add3_dev(s->prev_pos, scale3_dev(dir, t));
+    float dist = norm3_dev(sub3_dev(intersection, ring_pos));
+    return s->ring_radius[gate_idx] - dist;
+}
+
+__device__ void race_isb_push_dev(const DroneCudaCtx& cfg, int agent_idx,
+                                  const DroneCudaState* s, int target_idx,
+                                  float pass_margin) {
+    if (!(cfg.race_isb_enabled > 0.0f)) return;
+    if (cfg.race_track_mode >= 2.0f) return;
+    if (cfg.isb_states == NULL || cfg.isb_counts == NULL || cfg.isb_cursors == NULL) return;
+    if (target_idx < 0 || target_idx >= DRONE_GATE_DEBUG_MAX) return;
+    float margin_min = cfg.race_isb_margin > 0.0f ? cfg.race_isb_margin : 0.8f;
+    if (pass_margin < margin_min) return;
+
+    int gate_offset = race_isb_gate_offset_dev(agent_idx, target_idx);
+    int slot = cfg.isb_cursors[gate_offset];
+    if (slot < 0 || slot >= DRONE_ISB_CAPACITY) slot = 0;
+
+    DroneCudaIsbState item;
+    item.pos = s->pos;
+    item.vel = s->vel;
+    item.quat = s->quat;
+    item.omega = s->omega;
+    #pragma unroll
+    for (int k = 0; k < 4; k++) item.rpms[k] = s->rpms[k];
+
+    cfg.isb_states[race_isb_state_offset_dev(agent_idx, target_idx, slot)] = item;
+    cfg.isb_cursors[gate_offset] = (slot + 1) % DRONE_ISB_CAPACITY;
+    if (cfg.isb_counts[gate_offset] < DRONE_ISB_CAPACITY) {
+        cfg.isb_counts[gate_offset] += 1;
+    }
+}
+
+__device__ void race_isb_perturb_state_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
+                                           curandStatePhilox4_32_10_t* rng) {
+    float pos_xy = cfg.race_isb_pos_xy > 0.0f ? cfg.race_isb_pos_xy : 0.45f;
+    float pos_z = cfg.race_isb_z > 0.0f ? cfg.race_isb_z : 0.25f;
+    float angle = cfg.race_isb_angle > 0.0f ? cfg.race_isb_angle : 0.18f;
+    float vel = cfg.race_isb_vel > 0.0f ? cfg.race_isb_vel : 0.60f;
+    float omega = cfg.race_isb_omega > 0.0f ? cfg.race_isb_omega : 0.60f;
+
+    s->pos.x += rndf_dev(-pos_xy, pos_xy, rng);
+    s->pos.y += rndf_dev(-pos_xy, pos_xy, rng);
+    s->pos.z += rndf_dev(-pos_z, pos_z, rng);
+    s->pos = clamp_world_dev(s->pos);
+
+    float4 dq = race_reset_quat_dev(rndf_dev(-angle, angle, rng),
+                                    rndf_dev(-angle, angle, rng),
+                                    rndf_dev(-angle, angle, rng));
+    s->quat = quat_mul_dev(dq, s->quat);
+    quat_normalize_dev(&s->quat);
+
+    s->vel.x += rndf_dev(-vel, vel, rng);
+    s->vel.y += rndf_dev(-vel, vel, rng);
+    s->vel.z += rndf_dev(-vel, vel, rng);
+    s->omega.x += rndf_dev(-omega, omega, rng);
+    s->omega.y += rndf_dev(-omega, omega, rng);
+    s->omega.z += rndf_dev(-omega, omega, rng);
+}
+
+__device__ bool race_try_isb_reset_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
+                                       curandStatePhilox4_32_10_t* rng,
+                                       int agent_idx, int target_idx) {
+    if (!(cfg.race_isb_enabled > 0.0f)) return false;
+    if (cfg.race_track_mode >= 2.0f) return false;
+    if (cfg.isb_states == NULL || cfg.isb_counts == NULL) return false;
+    if (target_idx < 0 || target_idx >= DRONE_GATE_DEBUG_MAX) return false;
+    if (rndf_dev(0.0f, 1.0f, rng) >= clampf_dev(cfg.race_isb_prob, 0.0f, 1.0f)) return false;
+
+    int gate_offset = race_isb_gate_offset_dev(agent_idx, target_idx);
+    int count = cfg.isb_counts[gate_offset];
+    if (count <= 0) return false;
+    if (count > DRONE_ISB_CAPACITY) count = DRONE_ISB_CAPACITY;
+    int slot = (int)floorf(rndf_dev(0.0f, (float)count, rng));
+    if (slot >= count) slot = count - 1;
+    DroneCudaIsbState item = cfg.isb_states[race_isb_state_offset_dev(agent_idx, target_idx, slot)];
+
+    s->pos = item.pos;
+    s->vel = item.vel;
+    s->quat = item.quat;
+    s->omega = item.omega;
+    #pragma unroll
+    for (int k = 0; k < 4; k++) s->rpms[k] = item.rpms[k];
+    s->buffer_idx = target_idx;
+    race_isb_perturb_state_dev(s, cfg, rng);
+    set_target_race_dev(s);
+    return true;
+}
+
 __device__ void race_set_state_between_dev(DroneCudaState* s, int target_idx,
                                            float t_min, float t_max, float lateral,
                                            float yaw_error, float forward_speed,
@@ -1977,7 +2120,8 @@ __device__ void race_set_state_before_first_dev(DroneCudaState* s,
 }
 
 __device__ void apply_race_reset_curriculum_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
-                                                curandStatePhilox4_32_10_t* rng) {
+                                                curandStatePhilox4_32_10_t* rng,
+                                                int agent_idx) {
     if (cfg.task != DRONE_TASK_RACE) return;
     if (!(cfg.minimal_vision_spawn_visible_target > 0.0f)) return;
     if (!(cfg.minimal_vision_enabled > 0.0f)) return;
@@ -1994,8 +2138,9 @@ __device__ void apply_race_reset_curriculum_dev(DroneCudaState* s, const DroneCu
         float lateral = cfg.race_reset_lateral > 0.0f ? cfg.race_reset_lateral : 0.35f;
         float speed_min = cfg.race_reset_speed_min > 0.0f ? cfg.race_reset_speed_min : 0.3f;
         float speed_max = cfg.race_reset_speed_max > 0.0f ? cfg.race_reset_speed_max : 1.4f;
-        int start_idx = (int)floorf(rndf_dev(0.0f, (float)s->buffer_size, rng));
-        if (start_idx >= s->buffer_size) start_idx = s->buffer_size - 1;
+        int target_idx = race_segment_target_idx_dev(s, cfg, rng);
+        if (race_try_isb_reset_dev(s, cfg, rng, agent_idx, target_idx)) return;
+        int start_idx = (target_idx - 1 + s->buffer_size) % s->buffer_size;
         race_set_state_segment_start_dev(s, start_idx, t_min, t_max, lateral,
                                          yaw_error, rndf_dev(speed_min, speed_max, rng), rng);
         set_target_race_dev(s);
@@ -2064,7 +2209,7 @@ __device__ int check_ring_dev(const DroneCudaState* s) {
 }
 
 __device__ void reset_one_dev(DroneCudaState* s, DroneCudaParams* p, const DroneCudaCtx& cfg,
-                              curandStatePhilox4_32_10_t* rng) {
+                              curandStatePhilox4_32_10_t* rng, int agent_idx) {
     DroneCudaState zero = {};
     *s = zero;
     init_params_dev(p, s, cfg, rng);
@@ -2099,7 +2244,7 @@ __device__ void reset_one_dev(DroneCudaState* s, DroneCudaParams* p, const Drone
     }
     if (cfg.task == DRONE_TASK_RACE) {
         reset_race_course_dev(s, cfg, rng);
-        apply_race_reset_curriculum_dev(s, cfg, rng);
+        apply_race_reset_curriculum_dev(s, cfg, rng, agent_idx);
     } else {
         set_target_hover_dev(s, cfg, rng);
         set_minimal_vision_visible_target_dev(s, cfg, rng);
@@ -2560,7 +2705,7 @@ __global__ void drone_reset_kernel(DroneCudaCtx cfg, float* observations, float*
     curandStatePhilox4_32_10_t r = cfg.rng[i];
     DroneCudaState s;
     DroneCudaParams p;
-    reset_one_dev(&s, &p, cfg, &r);
+    reset_one_dev(&s, &p, cfg, &r, i);
     cfg.states[i] = s;
     cfg.params[i] = p;
     cfg.rng[i] = r;
@@ -2632,6 +2777,11 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
             if (current_gate_idx >= 0 && current_gate_idx < DRONE_GATE_DEBUG_MAX) {
                 s.gate_pass_count[current_gate_idx] += 1.0f;
             }
+            if (s.buffer_size > 0) {
+                int next_target = (current_gate_idx + 1) % s.buffer_size;
+                race_isb_push_dev(cfg, i, &s, next_target,
+                                  race_pass_margin_dev(&s, current_gate_idx));
+            }
             lap_complete = cfg.race_segment_mode >= 1.0f
                 || (s.buffer_size > 0 && s.buffer_idx == s.buffer_size - 1);
             r_terminal += 0.2f;
@@ -2699,7 +2849,7 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
     if (done) {
         log_done_dev(cfg.log, &s, &p, cfg, oob, timeout, lap_complete);
         adr_record_done_dev(cfg, &s, timeout);
-        reset_one_dev(&s, &p, cfg, &r);
+        reset_one_dev(&s, &p, cfg, &r, i);
     }
 
     compute_obs_dev(&s, &p, cfg, &r, observations + (size_t)i * DRONE_OBS_SIZE);
@@ -2802,6 +2952,16 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.minimal_vision_spawn_visible_target = dict_float(env_kwargs, "minimal_vision_spawn_visible_target", 0.0f);
     ctx.race_track_mode = dict_float(env_kwargs, "race_track_mode", 0.0f);
     ctx.race_segment_mode = dict_float(env_kwargs, "race_segment_mode", 0.0f);
+    ctx.race_isb_enabled = dict_float(env_kwargs, "race_isb_enabled", 0.0f);
+    ctx.race_isb_prob = dict_float(env_kwargs, "race_isb_prob", 0.0f);
+    ctx.race_isb_margin = dict_float(env_kwargs, "race_isb_margin", 0.8f);
+    ctx.race_isb_pos_xy = dict_float(env_kwargs, "race_isb_pos_xy", 0.45f);
+    ctx.race_isb_z = dict_float(env_kwargs, "race_isb_z", 0.25f);
+    ctx.race_isb_angle = dict_float(env_kwargs, "race_isb_angle", 0.18f);
+    ctx.race_isb_vel = dict_float(env_kwargs, "race_isb_vel", 0.60f);
+    ctx.race_isb_omega = dict_float(env_kwargs, "race_isb_omega", 0.60f);
+    ctx.race_hard_gate_idx = dict_float(env_kwargs, "race_hard_gate_idx", -1.0f);
+    ctx.race_hard_gate_prob = dict_float(env_kwargs, "race_hard_gate_prob", 0.0f);
     ctx.race_course_yaw_delta = dict_float(env_kwargs, "race_course_yaw_delta", 0.0f);
     ctx.race_course_pitch_delta = dict_float(env_kwargs, "race_course_pitch_delta", 0.0f);
     ctx.race_course_pitch_limit = dict_float(env_kwargs, "race_course_pitch_limit", 0.0f);
@@ -2905,6 +3065,15 @@ extern "C" void cuda_env_init(StaticVec* vec, Dict* vec_kwargs, Dict* env_kwargs
                               (size_t)ctx->total_agents * sizeof(curandStatePhilox4_32_10_t)));
     CUDA_ENV_CHECK(cudaMalloc((void**)&ctx->log, sizeof(DroneCudaLog)));
     CUDA_ENV_CHECK(cudaMemset(ctx->log, 0, sizeof(DroneCudaLog)));
+    size_t isb_gates = (size_t)ctx->total_agents * DRONE_GATE_DEBUG_MAX;
+    size_t isb_states = isb_gates * DRONE_ISB_CAPACITY;
+    CUDA_ENV_CHECK(cudaMalloc((void**)&ctx->isb_states,
+                              isb_states * sizeof(DroneCudaIsbState)));
+    CUDA_ENV_CHECK(cudaMalloc((void**)&ctx->isb_counts, isb_gates * sizeof(int)));
+    CUDA_ENV_CHECK(cudaMalloc((void**)&ctx->isb_cursors, isb_gates * sizeof(int)));
+    CUDA_ENV_CHECK(cudaMemset(ctx->isb_states, 0, isb_states * sizeof(DroneCudaIsbState)));
+    CUDA_ENV_CHECK(cudaMemset(ctx->isb_counts, 0, isb_gates * sizeof(int)));
+    CUDA_ENV_CHECK(cudaMemset(ctx->isb_cursors, 0, isb_gates * sizeof(int)));
     if (ctx->adr_enabled > 0.0f) {
         DroneCudaAdrState host_adr = make_host_adr_state(ctx);
         CUDA_ENV_CHECK(cudaMalloc((void**)&ctx->adr, sizeof(DroneCudaAdrState)));
@@ -2925,6 +3094,13 @@ extern "C" void cuda_env_reset(StaticVec* vec) {
     if (ctx == NULL) return;
     ctx->tick = 0;
     CUDA_ENV_CHECK(cudaMemset(ctx->log, 0, sizeof(DroneCudaLog)));
+    size_t isb_gates = (size_t)ctx->total_agents * DRONE_GATE_DEBUG_MAX;
+    if (ctx->isb_counts != NULL) {
+        CUDA_ENV_CHECK(cudaMemset(ctx->isb_counts, 0, isb_gates * sizeof(int)));
+    }
+    if (ctx->isb_cursors != NULL) {
+        CUDA_ENV_CHECK(cudaMemset(ctx->isb_cursors, 0, isb_gates * sizeof(int)));
+    }
     int block = 128;
     int grid = (ctx->total_agents + block - 1) / block;
     drone_reset_kernel<<<grid, block>>>(*ctx, (float*)vec->gpu_observations,
@@ -3271,6 +3447,9 @@ extern "C" void cuda_env_close(StaticVec* vec) {
     CUDA_ENV_CHECK(cudaFree(ctx->rng));
     CUDA_ENV_CHECK(cudaFree(ctx->log));
     if (ctx->adr != NULL) CUDA_ENV_CHECK(cudaFree(ctx->adr));
+    if (ctx->isb_states != NULL) CUDA_ENV_CHECK(cudaFree(ctx->isb_states));
+    if (ctx->isb_counts != NULL) CUDA_ENV_CHECK(cudaFree(ctx->isb_counts));
+    if (ctx->isb_cursors != NULL) CUDA_ENV_CHECK(cudaFree(ctx->isb_cursors));
     free(ctx);
     vec->cuda_env = NULL;
 }
