@@ -9,6 +9,7 @@ typedef __nv_bfloat16 precision_t;
 #endif
 
 #include <math.h>
+#include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1926,13 +1927,13 @@ __device__ __forceinline__ int race_isb_state_offset_dev(int agent_idx, int gate
 }
 
 __device__ float race_pass_margin_dev(const DroneCudaState* s, int gate_idx) {
-    if (gate_idx < 0 || gate_idx >= s->buffer_size) return -CUDART_INF_F;
+    if (gate_idx < 0 || gate_idx >= s->buffer_size) return -FLT_MAX;
     float3 ring_pos = s->ring_pos[gate_idx];
     float3 ring_normal = s->ring_normal[gate_idx];
     float prev_dot = dot3_dev(sub3_dev(s->prev_pos, ring_pos), ring_normal);
     float3 dir = sub3_dev(s->pos, s->prev_pos);
     float denom = dot3_dev(ring_normal, dir);
-    if (fabsf(denom) < 1e-9f) return -CUDART_INF_F;
+    if (fabsf(denom) < 1e-9f) return -FLT_MAX;
     float t = -prev_dot / denom;
     float3 intersection = add3_dev(s->prev_pos, scale3_dev(dir, t));
     float dist = norm3_dev(sub3_dev(intersection, ring_pos));
