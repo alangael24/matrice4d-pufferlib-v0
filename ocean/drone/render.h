@@ -496,7 +496,7 @@ void c_render(DroneEnv* env) {
         exit(0);
     }
 
-    if (IsKeyPressed(KEY_SPACE)) {
+    if (!env_int("PUFFER_DRONE_LOCK_TASK", 0) && IsKeyPressed(KEY_SPACE)) {
         env->task = (DroneTask)((env->task + 1) % TASK_N);
 
         if (env->task == RACE) {

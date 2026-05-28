@@ -15,7 +15,17 @@ typedef __nv_bfloat16 precision_t;
 
 #include "vecenv.h"
 
-#define DRONE_OBS_SIZE 23
+#define DRONE_STATE_OBS_SIZE 23
+#ifndef DRONE_MINIMAL_VISION_WIDTH
+#define DRONE_MINIMAL_VISION_WIDTH 3
+#endif
+#ifndef DRONE_MINIMAL_VISION_HEIGHT
+#define DRONE_MINIMAL_VISION_HEIGHT 1
+#endif
+#define DRONE_MINIMAL_VISION_PIXELS (DRONE_MINIMAL_VISION_WIDTH * DRONE_MINIMAL_VISION_HEIGHT)
+#define DRONE_MINIMAL_VISION_CHANNELS 3
+#define DRONE_MINIMAL_VISION_OBS_SIZE (DRONE_MINIMAL_VISION_PIXELS * DRONE_MINIMAL_VISION_CHANNELS)
+#define DRONE_OBS_SIZE (DRONE_STATE_OBS_SIZE + DRONE_MINIMAL_VISION_OBS_SIZE)
 #define DRONE_NUM_ATNS 4
 #define DRONE_HORIZON 1024
 
@@ -71,6 +81,11 @@ typedef __nv_bfloat16 precision_t;
 #define DRONE_ADR_LEGACY_EDGE_COUNT (DRONE_ADR_LEGACY_PARAM_COUNT * 2)
 #define DRONE_ADR_SIDE_LOW 0
 #define DRONE_ADR_SIDE_HIGH 1
+#define DRONE_TASK_HOVER 1
+#define DRONE_TASK_RACE 7
+#define DRONE_CUDA_MAX_RINGS 16
+#define DRONE_GATE_DEBUG_MAX 8
+#define DRONE_RING_RADIUS 2.0f
 #define DRONE_ADR_USABLE_T2W 0
 #define DRONE_ADR_MASS 1
 #define DRONE_ADR_INERTIA 2
@@ -135,6 +150,15 @@ struct DroneCudaState {
 
     float3 target_pos;
     float3 target_normal;
+    float3 ring_pos[DRONE_CUDA_MAX_RINGS];
+    float3 ring_normal[DRONE_CUDA_MAX_RINGS];
+    float ring_radius[DRONE_CUDA_MAX_RINGS];
+    int buffer_idx;
+    int buffer_size;
+    float rings_passed;
+    float race_gate_bank;
+    float ring_collision;
+    float collisions;
     float3 prev_pos;
     float prev_potential;
     float episode_return;
@@ -160,6 +184,23 @@ struct DroneCudaState {
     float motor_clip_high_count;
     float rpm_sum[4];
     float instrumentation_steps;
+    float target_in_fov_sum;
+    float retina_rgb_mean_sum;
+    float retina_rgb_std_sum;
+    float retina_energy_sum;
+    float retina_argmax_sum;
+    float retina_argmax_left_count;
+    float retina_argmax_center_count;
+    float retina_argmax_right_count;
+    float bearing_error_sum;
+    float distance_to_target_sum;
+    float retina_signal_vs_distance_sum;
+    float gate_time[DRONE_GATE_DEBUG_MAX];
+    float gate_target_in_fov[DRONE_GATE_DEBUG_MAX];
+    float gate_bearing_error[DRONE_GATE_DEBUG_MAX];
+    float gate_distance_to_target[DRONE_GATE_DEBUG_MAX];
+    float gate_pass_count[DRONE_GATE_DEBUG_MAX];
+    float gate_collision_count[DRONE_GATE_DEBUG_MAX];
 
     float r_dist_sum;
     float r_hover_sum;
@@ -217,6 +258,17 @@ struct DroneCudaLog {
     float mean_rpm_FR;
     float mean_rpm_RL;
     float mean_rpm_RR;
+    float target_in_fov_frac;
+    float retina_rgb_mean;
+    float retina_rgb_std;
+    float retina_energy;
+    float retina_left_center_right_argmax;
+    float retina_argmax_left_frac;
+    float retina_argmax_center_frac;
+    float retina_argmax_right_frac;
+    float bearing_error_to_target;
+    float distance_to_target;
+    float retina_signal_vs_distance;
     float r_dist;
     float r_hover;
     float r_shaping;
@@ -237,6 +289,21 @@ struct DroneCudaLog {
     float com_x_mean;
     float com_y_mean;
     float com_z_mean;
+    float lap_complete;
+    float oob_diag_count;
+    float gate_index_at_oob;
+    float position_norm_at_oob;
+    float target_gate_position_norm;
+    float next_gate_position_norm;
+    float distance_from_track_centerline;
+    float gate_time[DRONE_GATE_DEBUG_MAX];
+    float gate_target_in_fov[DRONE_GATE_DEBUG_MAX];
+    float gate_bearing_error[DRONE_GATE_DEBUG_MAX];
+    float gate_distance_to_target[DRONE_GATE_DEBUG_MAX];
+    float gate_pass_count[DRONE_GATE_DEBUG_MAX];
+    float gate_collision_count[DRONE_GATE_DEBUG_MAX];
+    float gate_timeout_count[DRONE_GATE_DEBUG_MAX];
+    float gate_oob_count[DRONE_GATE_DEBUG_MAX];
     float n;
 };
 
@@ -271,6 +338,7 @@ struct DroneCudaCtx {
     int total_agents;
     int horizon;
     int task;
+    int max_rings;
     int action_latency_steps;
 
     float alpha_dist, alpha_hover, alpha_shaping;
@@ -313,6 +381,31 @@ struct DroneCudaCtx {
     float normalized_thrust_min, normalized_thrust_max;
     float reset_pos_scale, reset_yaw_range, reset_vel_max;
     float sensor_noise;
+    float minimal_vision_enabled;
+    float minimal_vision_only;
+    float minimal_vision_mask_target;
+    float minimal_vision_fov;
+    float minimal_vision_vfov;
+    float minimal_vision_sigma;
+    float minimal_vision_depth_gain;
+    float minimal_vision_noise;
+    float minimal_vision_distractors;
+    float minimal_vision_spawn_visible_target;
+    float race_track_mode;
+    float race_segment_mode;
+    float race_course_yaw_delta;
+    float race_course_pitch_delta;
+    float race_course_pitch_limit;
+    float race_course_spacing_min;
+    float race_course_spacing_max;
+    float race_course_dz_max;
+    float race_reset_start_prob;
+    float race_reset_t_min;
+    float race_reset_t_max;
+    float race_reset_lateral;
+    float race_reset_yaw_error_frac;
+    float race_reset_speed_min;
+    float race_reset_speed_max;
 
     DroneCudaState* states;
     DroneCudaParams* params;
@@ -371,6 +464,44 @@ __device__ __forceinline__ float norm3_dev(float3 a) {
     return sqrtf(dot3_dev(a, a));
 }
 
+__device__ __forceinline__ int race_clamped_gate_idx_dev(const DroneCudaState* s) {
+    if (s->buffer_size <= 0) return 0;
+    int idx = s->buffer_idx;
+    if (idx < 0) return 0;
+    if (idx >= s->buffer_size) return s->buffer_size - 1;
+    return idx;
+}
+
+__device__ __forceinline__ float point_segment_distance3_dev(float3 p, float3 a, float3 b) {
+    float3 ab = sub3_dev(b, a);
+    float denom = dot3_dev(ab, ab);
+    if (denom <= 1e-6f) return norm3_dev(sub3_dev(p, b));
+    float t = dot3_dev(sub3_dev(p, a), ab) / denom;
+    t = clampf_dev(t, 0.0f, 1.0f);
+    float3 closest = add3_dev(a, scale3_dev(ab, t));
+    return norm3_dev(sub3_dev(p, closest));
+}
+
+__device__ __forceinline__ float race_track_centerline_distance_dev(const DroneCudaState* s) {
+    if (s->buffer_size <= 0) return 0.0f;
+    int idx = race_clamped_gate_idx_dev(s);
+    int prev_idx = idx > 0 ? idx - 1 : idx;
+    return point_segment_distance3_dev(s->pos, s->ring_pos[prev_idx], s->ring_pos[idx]);
+}
+
+__device__ __forceinline__ float3 race_next_gate_pos_dev(const DroneCudaState* s) {
+    if (s->buffer_size <= 0) return s->target_pos;
+    int idx = race_clamped_gate_idx_dev(s);
+    int next_idx = idx + 1 < s->buffer_size ? idx + 1 : idx;
+    return s->ring_pos[next_idx];
+}
+
+__device__ __forceinline__ float3 normalize3_dev(float3 a, float3 fallback) {
+    float n = norm3_dev(a);
+    if (n <= 1e-6f) return fallback;
+    return scale3_dev(a, 1.0f / n);
+}
+
 __device__ __forceinline__ float rndf_dev(float a, float b, curandStatePhilox4_32_10_t* rng) {
     return a + curand_uniform(rng) * (b - a);
 }
@@ -418,6 +549,12 @@ __device__ __forceinline__ float3 quat_rotate_dev(float4 q, float3 v) {
 __device__ __forceinline__ float4 quat_from_yaw_dev(float yaw) {
     float half = 0.5f * yaw;
     return quat_dev(cosf(half), 0.0f, 0.0f, sinf(half));
+}
+
+__device__ __forceinline__ float4 quat_from_axis_angle_dev(float3 axis, float angle) {
+    float half = 0.5f * angle;
+    float s = sinf(half);
+    return quat_dev(cosf(half), axis.x * s, axis.y * s, axis.z * s);
 }
 
 __device__ __forceinline__ float dr_abs_range_dev(float v) {
@@ -1504,6 +1641,428 @@ __device__ void set_target_hover_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
     s->target_normal = make_float3(0.0f, 0.0f, 1.0f);
 }
 
+__device__ void set_minimal_vision_visible_target_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
+                                                      curandStatePhilox4_32_10_t* rng) {
+    if (!(cfg.minimal_vision_spawn_visible_target > 0.0f)) return;
+    if (!(cfg.minimal_vision_enabled > 0.0f)) return;
+    if (cfg.task != DRONE_TASK_HOVER) return;
+
+    float fov = fmaxf(fabsf(cfg.minimal_vision_fov), 0.1f);
+    float vfov = fmaxf(fabsf(cfg.minimal_vision_vfov), 0.1f);
+    float dist = rndf_dev(0.45f * cfg.hover_target_dist, cfg.hover_target_dist, rng);
+    float yaw = rndf_dev(-0.35f * fov, 0.35f * fov, rng);
+    float pitch = rndf_dev(-0.25f * vfov, 0.25f * vfov, rng);
+    float cp = cosf(pitch);
+    float3 body = make_float3(dist * cp * cosf(yaw), dist * cp * sinf(yaw), dist * sinf(pitch));
+    float3 world = quat_rotate_dev(s->quat, body);
+    float3 p = add3_dev(s->pos, world);
+    s->target_pos = make_float3(
+        clampf_dev(p.x, -DRONE_MARGIN_X, DRONE_MARGIN_X),
+        clampf_dev(p.y, -DRONE_MARGIN_Y, DRONE_MARGIN_Y),
+        clampf_dev(p.z, -DRONE_MARGIN_Z, DRONE_MARGIN_Z));
+    s->target_normal = make_float3(0.0f, 0.0f, 1.0f);
+}
+
+__device__ __forceinline__ int race_ring_count_dev(const DroneCudaCtx& cfg) {
+    int n = cfg.max_rings;
+    if (cfg.race_track_mode >= 1.0f && n > 7) n = 7;
+    if (n < 1) n = 1;
+    if (n > DRONE_CUDA_MAX_RINGS) n = DRONE_CUDA_MAX_RINGS;
+    return n;
+}
+
+__device__ __forceinline__ float3 clamp_world_dev(float3 p) {
+    return make_float3(
+        clampf_dev(p.x, -DRONE_MARGIN_X, DRONE_MARGIN_X),
+        clampf_dev(p.y, -DRONE_MARGIN_Y, DRONE_MARGIN_Y),
+        clampf_dev(p.z, -DRONE_MARGIN_Z, DRONE_MARGIN_Z));
+}
+
+__device__ float3 random_unit_dev(curandStatePhilox4_32_10_t* rng) {
+    float u = rndf_dev(0.0f, 1.0f, rng);
+    float v = rndf_dev(0.0f, 1.0f, rng);
+    float z = 2.0f * v - 1.0f;
+    float a = 2.0f * DRONE_PI * u;
+    float r_xy = sqrtf(fmaxf(0.0f, 1.0f - z * z));
+    return make_float3(r_xy * cosf(a), r_xy * sinf(a), z);
+}
+
+__device__ __forceinline__ float3 race_course_dir_from_yaw_pitch_dev(float yaw, float pitch) {
+    float cp = cosf(pitch);
+    return normalize3_dev(make_float3(
+        cp * cosf(yaw),
+        cp * sinf(yaw),
+        sinf(pitch)), make_float3(1.0f, 0.0f, 0.0f));
+}
+
+__device__ float3 race_course_next_visible_dir_dev(float3 prev_dir, const DroneCudaCtx& cfg,
+                                                  curandStatePhilox4_32_10_t* rng) {
+    prev_dir = normalize3_dev(prev_dir, make_float3(1.0f, 0.0f, 0.0f));
+    float base_yaw = atan2f(prev_dir.y, prev_dir.x);
+    float horiz = sqrtf(prev_dir.x * prev_dir.x + prev_dir.y * prev_dir.y);
+    float base_pitch = atan2f(prev_dir.z, fmaxf(horiz, 1e-3f));
+
+    float max_yaw_delta = cfg.race_course_yaw_delta > 0.0f
+        ? cfg.race_course_yaw_delta
+        : fminf(0.38f, 0.18f * fmaxf(fabsf(cfg.minimal_vision_fov), 0.1f));
+    float max_pitch_delta = cfg.race_course_pitch_delta > 0.0f
+        ? cfg.race_course_pitch_delta
+        : fminf(0.20f, 0.12f * fmaxf(fabsf(cfg.minimal_vision_vfov), 0.1f));
+    float pitch_limit = cfg.race_course_pitch_limit > 0.0f
+        ? cfg.race_course_pitch_limit
+        : 0.30f;
+    float yaw = base_yaw + rndf_dev(-max_yaw_delta, max_yaw_delta, rng);
+    float pitch = clampf_dev(base_pitch + rndf_dev(-max_pitch_delta, max_pitch_delta, rng),
+                             -pitch_limit, pitch_limit);
+    return race_course_dir_from_yaw_pitch_dev(yaw, pitch);
+}
+
+__device__ __forceinline__ float3 race_course_side_dev(float3 dir) {
+    float3 horiz = normalize3_dev(make_float3(dir.x, dir.y, 0.0f),
+                                  make_float3(1.0f, 0.0f, 0.0f));
+    return normalize3_dev(make_float3(-horiz.y, horiz.x, 0.0f),
+                          make_float3(0.0f, 1.0f, 0.0f));
+}
+
+__device__ __forceinline__ float4 race_reset_quat_dev(float yaw, float pitch, float roll) {
+    float4 q_yaw = quat_from_axis_angle_dev(make_float3(0.0f, 0.0f, 1.0f), yaw);
+    float4 q_pitch = quat_from_axis_angle_dev(make_float3(0.0f, 1.0f, 0.0f), pitch);
+    float4 q_roll = quat_from_axis_angle_dev(make_float3(1.0f, 0.0f, 0.0f), roll);
+    float4 q = quat_mul_dev(q_yaw, quat_mul_dev(q_pitch, q_roll));
+    quat_normalize_dev(&q);
+    return q;
+}
+
+__device__ __forceinline__ float3 race_swift_like_base_pos_dev(int idx) {
+    switch (idx) {
+        case 0: return make_float3(-0.60f, -0.86f, 3.68f);
+        case 1: return make_float3( 9.00f,  6.45f, 1.05f);
+        case 2: return make_float3( 8.85f, -3.80f, 1.05f);
+        case 3: return make_float3(-4.30f, -5.60f, 3.40f);
+        case 4: return make_float3(-4.30f, -5.60f, 1.42f);
+        case 5: return make_float3( 4.50f, -0.45f, 1.05f);
+        default: return make_float3(-1.95f, 6.81f, 1.05f);
+    }
+}
+
+__device__ __forceinline__ float race_swift_like_base_yaw_dev(int idx) {
+    switch (idx) {
+        case 0: return -0.34906585f;
+        case 1: return  0.0f;
+        case 2: return -2.26892803f;
+        case 3: return -DRONE_PI;
+        case 4: return  0.0f;
+        case 5: return  1.39626340f;
+        default: return -2.61799388f;
+    }
+}
+
+__device__ __forceinline__ float3 rotate_yaw_dev(float3 p, float yaw) {
+    float c = cosf(yaw);
+    float s = sinf(yaw);
+    return make_float3(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
+}
+
+__device__ void set_target_race_dev(DroneCudaState* s) {
+    int idx = s->buffer_idx;
+    if (idx < 0) idx = 0;
+    if (idx >= s->buffer_size) idx = s->buffer_size - 1;
+    s->target_pos = s->ring_pos[idx];
+    s->target_normal = s->ring_normal[idx];
+}
+
+__device__ void reset_race_course_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
+                                      curandStatePhilox4_32_10_t* rng) {
+    int n = race_ring_count_dev(cfg);
+    s->buffer_size = n;
+    s->buffer_idx = 0;
+
+    if (cfg.race_track_mode >= 1.0f) {
+        bool randomized = cfg.race_track_mode >= 2.0f;
+        float global_yaw = randomized ? rndf_dev(-DRONE_PI, DRONE_PI, rng) : 0.0f;
+        float scale = randomized ? rndf_dev(0.90f, 1.10f, rng) : 1.0f;
+        float mirror = randomized && rndf_dev(0.0f, 1.0f, rng) < 0.5f ? -1.0f : 1.0f;
+        float3 offset = randomized
+            ? make_float3(rndf_dev(-3.0f, 3.0f, rng), rndf_dev(-3.0f, 3.0f, rng),
+                          rndf_dev(-0.15f, 0.15f, rng))
+            : make_float3(0.0f, 0.0f, 0.0f);
+
+        for (int i = 0; i < DRONE_CUDA_MAX_RINGS; i++) {
+            if (i >= n) break;
+            float3 p = race_swift_like_base_pos_dev(i);
+            p.y *= mirror;
+            p = scale3_dev(p, scale);
+            p = rotate_yaw_dev(p, global_yaw);
+            p = clamp_world_dev(add3_dev(p, offset));
+
+            float yaw = global_yaw + mirror * race_swift_like_base_yaw_dev(i);
+            float3 normal = normalize3_dev(make_float3(cosf(yaw), sinf(yaw), 0.0f),
+                                           make_float3(1.0f, 0.0f, 0.0f));
+            s->ring_pos[i] = p;
+            s->ring_normal[i] = normal;
+            s->ring_radius[i] = DRONE_RING_RADIUS;
+        }
+
+        set_target_race_dev(s);
+        return;
+    }
+
+    float segment = fmaxf(cfg.hover_target_dist, 4.0f);
+    float fov = fmaxf(fabsf(cfg.minimal_vision_fov), 0.1f);
+    float vfov = fmaxf(fabsf(cfg.minimal_vision_vfov), 0.1f);
+    float3 prev_pos = s->pos;
+    float3 prev_dir = quat_rotate_dev(s->quat, make_float3(1.0f, 0.0f, 0.0f));
+    prev_dir = normalize3_dev(prev_dir, make_float3(1.0f, 0.0f, 0.0f));
+
+    for (int i = 0; i < DRONE_CUDA_MAX_RINGS; i++) {
+        if (i >= n) break;
+
+        float3 ring_pos;
+        float3 normal;
+        if (i == 0 && cfg.minimal_vision_spawn_visible_target > 0.0f) {
+            float dist = rndf_dev(0.55f * segment, 0.90f * segment, rng);
+            float yaw = rndf_dev(-0.18f * fov, 0.18f * fov, rng);
+            float pitch = rndf_dev(-0.10f * vfov, 0.10f * vfov, rng);
+            float cp = cosf(pitch);
+            float3 body = make_float3(dist * cp * cosf(yaw),
+                                       dist * cp * sinf(yaw),
+                                       dist * sinf(pitch));
+            float3 world = quat_rotate_dev(s->quat, body);
+            ring_pos = clamp_world_dev(add3_dev(s->pos, world));
+            normal = normalize3_dev(world, prev_dir);
+        } else if (cfg.minimal_vision_spawn_visible_target > 0.0f) {
+            normal = race_course_next_visible_dir_dev(prev_dir, cfg, rng);
+            float spacing_lo = cfg.race_course_spacing_min > 0.0f
+                ? cfg.race_course_spacing_min
+                : fmaxf(3.0f, 0.75f * clampf_dev(segment, 3.0f, 5.0f));
+            float spacing_hi = cfg.race_course_spacing_max > 0.0f
+                ? cfg.race_course_spacing_max
+                : clampf_dev(segment, 3.0f, 5.0f);
+            spacing_hi = fmaxf(spacing_hi, spacing_lo);
+            float dist = rndf_dev(spacing_lo, spacing_hi, rng);
+            float dz_max = cfg.race_course_dz_max > 0.0f ? cfg.race_course_dz_max : 0.35f;
+            float dz = clampf_dev(dist * normal.z, -dz_max, dz_max);
+            float xy = sqrtf(fmaxf(0.0f, dist * dist - dz * dz));
+            float3 prev_horiz = normalize3_dev(make_float3(prev_dir.x, prev_dir.y, 0.0f),
+                                               make_float3(1.0f, 0.0f, 0.0f));
+            float3 horiz = normalize3_dev(make_float3(normal.x, normal.y, 0.0f), prev_horiz);
+            ring_pos = clamp_world_dev(add3_dev(prev_pos, make_float3(
+                horiz.x * xy,
+                horiz.y * xy,
+                dz)));
+            normal = normalize3_dev(sub3_dev(ring_pos, prev_pos), normal);
+        } else {
+            ring_pos = make_float3(
+                rndf_dev(-DRONE_GRID_X + 2.0f * DRONE_RING_RADIUS,
+                         DRONE_GRID_X - 2.0f * DRONE_RING_RADIUS, rng),
+                rndf_dev(-DRONE_GRID_Y + 2.0f * DRONE_RING_RADIUS,
+                         DRONE_GRID_Y - 2.0f * DRONE_RING_RADIUS, rng),
+                rndf_dev(-DRONE_GRID_Z + 2.0f * DRONE_RING_RADIUS,
+                         DRONE_GRID_Z - 2.0f * DRONE_RING_RADIUS, rng));
+            normal = random_unit_dev(rng);
+        }
+
+        s->ring_pos[i] = ring_pos;
+        s->ring_normal[i] = normal;
+        s->ring_radius[i] = DRONE_RING_RADIUS;
+        prev_pos = ring_pos;
+        prev_dir = normal;
+    }
+
+    set_target_race_dev(s);
+}
+
+__device__ int race_random_target_idx_dev(const DroneCudaState* s,
+                                          curandStatePhilox4_32_10_t* rng) {
+    if (s->buffer_size <= 1) return 0;
+    int idx = 1 + (int)floorf(rndf_dev(0.0f, (float)(s->buffer_size - 1), rng));
+    if (idx < 1) idx = 1;
+    if (idx >= s->buffer_size) idx = s->buffer_size - 1;
+    return idx;
+}
+
+__device__ void race_set_state_between_dev(DroneCudaState* s, int target_idx,
+                                           float t_min, float t_max, float lateral,
+                                           float yaw_error, float forward_speed,
+                                           curandStatePhilox4_32_10_t* rng) {
+    float3 prev_pos = s->ring_pos[target_idx - 1];
+    float3 target_pos = s->ring_pos[target_idx];
+    float3 segment = sub3_dev(target_pos, prev_pos);
+    float len = fmaxf(norm3_dev(segment), 1e-3f);
+    float3 dir = normalize3_dev(segment, s->ring_normal[target_idx]);
+    float3 side = race_course_side_dev(dir);
+    float t = rndf_dev(t_min, t_max, rng);
+    float side_offset = rndf_dev(-lateral, lateral, rng);
+    float z_offset = rndf_dev(-0.15f, 0.15f, rng);
+    s->pos = clamp_world_dev(add3_dev(prev_pos, add3_dev(
+        scale3_dev(dir, len * t),
+        add3_dev(scale3_dev(side, side_offset), make_float3(0.0f, 0.0f, z_offset)))));
+
+    float3 to_target = sub3_dev(target_pos, s->pos);
+    float yaw_to_target = atan2f(to_target.y, to_target.x);
+    float roll = rndf_dev(-0.04f, 0.04f, rng);
+    float pitch = rndf_dev(-0.04f, 0.04f, rng);
+    s->quat = race_reset_quat_dev(yaw_to_target - yaw_error, pitch, roll);
+    s->vel = add3_dev(scale3_dev(dir, forward_speed),
+                      scale3_dev(side, rndf_dev(-0.4f, 0.4f, rng)));
+    s->vel.z += rndf_dev(-0.12f, 0.12f, rng);
+    s->omega = make_float3(rndf_dev(-0.15f, 0.15f, rng),
+                           rndf_dev(-0.15f, 0.15f, rng),
+                           rndf_dev(-0.20f, 0.20f, rng));
+    s->buffer_idx = target_idx;
+}
+
+__device__ void race_set_state_segment_start_dev(DroneCudaState* s, int start_idx,
+                                                 float t_min, float t_max, float lateral,
+                                                 float yaw_error, float forward_speed,
+                                                 curandStatePhilox4_32_10_t* rng) {
+    int n = s->buffer_size;
+    if (n <= 1) return;
+    start_idx = start_idx % n;
+    if (start_idx < 0) start_idx += n;
+    int target_idx = (start_idx + 1) % n;
+    float3 start_pos = s->ring_pos[start_idx];
+    float3 target_pos = s->ring_pos[target_idx];
+    float3 segment = sub3_dev(target_pos, start_pos);
+    float len = fmaxf(norm3_dev(segment), 1e-3f);
+    float3 dir = normalize3_dev(segment, s->ring_normal[target_idx]);
+    float3 side = race_course_side_dev(dir);
+    float t = rndf_dev(t_min, t_max, rng);
+    float side_offset = rndf_dev(-lateral, lateral, rng);
+    float z_offset = rndf_dev(-0.12f, 0.12f, rng);
+    s->pos = clamp_world_dev(add3_dev(start_pos, add3_dev(
+        scale3_dev(dir, len * t),
+        add3_dev(scale3_dev(side, side_offset), make_float3(0.0f, 0.0f, z_offset)))));
+
+    float3 to_target = sub3_dev(target_pos, s->pos);
+    float yaw_to_target = atan2f(to_target.y, to_target.x);
+    float roll = rndf_dev(-0.04f, 0.04f, rng);
+    float pitch = rndf_dev(-0.04f, 0.04f, rng);
+    s->quat = race_reset_quat_dev(yaw_to_target - yaw_error, pitch, roll);
+    s->vel = add3_dev(scale3_dev(dir, forward_speed),
+                      scale3_dev(side, rndf_dev(-0.35f, 0.35f, rng)));
+    s->vel.z += rndf_dev(-0.10f, 0.10f, rng);
+    s->omega = make_float3(rndf_dev(-0.15f, 0.15f, rng),
+                           rndf_dev(-0.15f, 0.15f, rng),
+                           rndf_dev(-0.20f, 0.20f, rng));
+    s->buffer_idx = target_idx;
+}
+
+__device__ void race_set_state_before_first_dev(DroneCudaState* s,
+                                                float lateral, float yaw_error,
+                                                float forward_speed,
+                                                curandStatePhilox4_32_10_t* rng) {
+    float3 target_pos = s->ring_pos[0];
+    float3 dir = normalize3_dev(s->ring_normal[0], make_float3(1.0f, 0.0f, 0.0f));
+    float3 side = race_course_side_dev(dir);
+    float dist = rndf_dev(2.5f, 4.5f, rng);
+    float side_offset = rndf_dev(-lateral, lateral, rng);
+    float z_offset = rndf_dev(-0.15f, 0.15f, rng);
+    s->pos = clamp_world_dev(add3_dev(target_pos, add3_dev(
+        scale3_dev(dir, -dist),
+        add3_dev(scale3_dev(side, side_offset), make_float3(0.0f, 0.0f, z_offset)))));
+
+    float3 to_target = sub3_dev(target_pos, s->pos);
+    float yaw_to_target = atan2f(to_target.y, to_target.x);
+    float roll = rndf_dev(-0.04f, 0.04f, rng);
+    float pitch = rndf_dev(-0.04f, 0.04f, rng);
+    s->quat = race_reset_quat_dev(yaw_to_target - yaw_error, pitch, roll);
+    s->vel = add3_dev(scale3_dev(dir, forward_speed),
+                      scale3_dev(side, rndf_dev(-0.25f, 0.25f, rng)));
+    s->vel.z += rndf_dev(-0.08f, 0.08f, rng);
+    s->omega = make_float3(rndf_dev(-0.12f, 0.12f, rng),
+                           rndf_dev(-0.12f, 0.12f, rng),
+                           rndf_dev(-0.16f, 0.16f, rng));
+    s->buffer_idx = 0;
+}
+
+__device__ void apply_race_reset_curriculum_dev(DroneCudaState* s, const DroneCudaCtx& cfg,
+                                                curandStatePhilox4_32_10_t* rng) {
+    if (cfg.task != DRONE_TASK_RACE) return;
+    if (!(cfg.minimal_vision_spawn_visible_target > 0.0f)) return;
+    if (!(cfg.minimal_vision_enabled > 0.0f)) return;
+    if (s->buffer_size <= 1) return;
+
+    if (cfg.race_segment_mode >= 1.0f) {
+        float yaw_error_frac = cfg.race_reset_yaw_error_frac > 0.0f
+            ? cfg.race_reset_yaw_error_frac
+            : 0.10f;
+        float yaw_error = rndf_dev(-yaw_error_frac * cfg.minimal_vision_fov,
+                                   yaw_error_frac * cfg.minimal_vision_fov, rng);
+        float t_min = cfg.race_reset_t_min > 0.0f ? cfg.race_reset_t_min : 0.02f;
+        float t_max = cfg.race_reset_t_max > 0.0f ? cfg.race_reset_t_max : 0.30f;
+        float lateral = cfg.race_reset_lateral > 0.0f ? cfg.race_reset_lateral : 0.35f;
+        float speed_min = cfg.race_reset_speed_min > 0.0f ? cfg.race_reset_speed_min : 0.3f;
+        float speed_max = cfg.race_reset_speed_max > 0.0f ? cfg.race_reset_speed_max : 1.4f;
+        int start_idx = (int)floorf(rndf_dev(0.0f, (float)s->buffer_size, rng));
+        if (start_idx >= s->buffer_size) start_idx = s->buffer_size - 1;
+        race_set_state_segment_start_dev(s, start_idx, t_min, t_max, lateral,
+                                         yaw_error, rndf_dev(speed_min, speed_max, rng), rng);
+        set_target_race_dev(s);
+        return;
+    }
+
+    float start_prob = cfg.race_reset_start_prob > 0.0f ? cfg.race_reset_start_prob : 0.90f;
+    float mix = rndf_dev(0.0f, 1.0f, rng);
+    if (mix < clampf_dev(start_prob, 0.0f, 1.0f)) {
+        if (cfg.race_track_mode >= 1.0f) {
+            float yaw_error_frac = cfg.race_reset_yaw_error_frac > 0.0f
+                ? cfg.race_reset_yaw_error_frac
+                : 0.10f;
+            float yaw_error = rndf_dev(-yaw_error_frac * cfg.minimal_vision_fov,
+                                       yaw_error_frac * cfg.minimal_vision_fov, rng);
+            float lateral = cfg.race_reset_lateral > 0.0f ? cfg.race_reset_lateral : 0.25f;
+            float speed_min = cfg.race_reset_speed_min > 0.0f ? cfg.race_reset_speed_min : 0.3f;
+            float speed_max = cfg.race_reset_speed_max > 0.0f ? cfg.race_reset_speed_max : 1.2f;
+            race_set_state_before_first_dev(s, lateral, yaw_error,
+                                            rndf_dev(speed_min, speed_max, rng), rng);
+        }
+        s->buffer_idx = 0;
+        set_target_race_dev(s);
+        return;
+    }
+
+    int target_idx = race_random_target_idx_dev(s, rng);
+    float yaw_error_frac = cfg.race_reset_yaw_error_frac > 0.0f
+        ? cfg.race_reset_yaw_error_frac
+        : 0.10f;
+    float yaw_error = rndf_dev(-yaw_error_frac * cfg.minimal_vision_fov,
+                               yaw_error_frac * cfg.minimal_vision_fov, rng);
+    float t_min = cfg.race_reset_t_min > 0.0f ? cfg.race_reset_t_min : 0.15f;
+    float t_max = cfg.race_reset_t_max > 0.0f ? cfg.race_reset_t_max : 0.45f;
+    float lateral = cfg.race_reset_lateral > 0.0f ? cfg.race_reset_lateral : 0.25f;
+    float speed_min = cfg.race_reset_speed_min > 0.0f ? cfg.race_reset_speed_min : 0.3f;
+    float speed_max = cfg.race_reset_speed_max > 0.0f ? cfg.race_reset_speed_max : 1.2f;
+    race_set_state_between_dev(s, target_idx, t_min, t_max, lateral,
+                               yaw_error, rndf_dev(speed_min, speed_max, rng), rng);
+
+    set_target_race_dev(s);
+}
+
+__device__ int check_ring_dev(const DroneCudaState* s) {
+    int idx = s->buffer_idx;
+    if (idx < 0 || idx >= s->buffer_size) return 0;
+
+    float3 ring_pos = s->ring_pos[idx];
+    float3 ring_normal = s->ring_normal[idx];
+    float ring_radius = s->ring_radius[idx];
+    float prev_dot = dot3_dev(sub3_dev(s->prev_pos, ring_pos), ring_normal);
+    float new_dot = dot3_dev(sub3_dev(s->pos, ring_pos), ring_normal);
+    bool valid_dir = prev_dot < 0.0f && new_dot > 0.0f;
+    bool invalid_dir = prev_dot > 0.0f && new_dot < 0.0f;
+    if (!(valid_dir || invalid_dir)) return 0;
+
+    float3 dir = sub3_dev(s->pos, s->prev_pos);
+    float denom = dot3_dev(ring_normal, dir);
+    if (fabsf(denom) < 1e-9f) return 0;
+    float t = -prev_dot / denom;
+    float3 intersection = add3_dev(s->prev_pos, scale3_dev(dir, t));
+    float dist = norm3_dev(sub3_dev(intersection, ring_pos));
+    if (dist < (ring_radius - 0.5f) && valid_dir) return 1;
+    if (dist < (ring_radius + 0.5f)) return -1;
+    return 0;
+}
+
 __device__ void reset_one_dev(DroneCudaState* s, DroneCudaParams* p, const DroneCudaCtx& cfg,
                               curandStatePhilox4_32_10_t* rng) {
     DroneCudaState zero = {};
@@ -1538,7 +2097,13 @@ __device__ void reset_one_dev(DroneCudaState* s, DroneCudaParams* p, const Drone
         float speed = cfg.reset_vel_max * cbrtf(rndf_dev(0.0f, 1.0f, rng));
         s->vel = scale3_dev(dir, speed);
     }
-    set_target_hover_dev(s, cfg, rng);
+    if (cfg.task == DRONE_TASK_RACE) {
+        reset_race_course_dev(s, cfg, rng);
+        apply_race_reset_curriculum_dev(s, cfg, rng);
+    } else {
+        set_target_hover_dev(s, cfg, rng);
+        set_minimal_vision_visible_target_dev(s, cfg, rng);
+    }
     s->pal_probe_active = curand_uniform(rng) <= clampf_dev(cfg.pal_probe_prob, 0.0f, 1.0f);
     s->prev_pos = s->pos;
     s->prev_potential = hover_potential_dev(s, cfg);
@@ -1568,54 +2133,245 @@ __device__ __forceinline__ void apply_pal_probe_dev(
     }
 }
 
+__device__ float minimal_vision_blob_intensity_dev(float4 q_inv, float3 pos, float3 target_pos,
+                                                   float center_x, float center_y,
+                                                   float sigma_x, float sigma_y,
+                                                   float depth_gain) {
+    float3 to_target_world = sub3_dev(target_pos, pos);
+    float3 to_target = quat_rotate_dev(q_inv, to_target_world);
+    float dist = norm3_dev(to_target_world);
+    float xy = sqrtf(to_target.x * to_target.x + to_target.y * to_target.y);
+    float yaw = atan2f(to_target.y, fmaxf(to_target.x, 1e-3f));
+    float pitch = atan2f(to_target.z, fmaxf(xy, 1e-3f));
+    float front = to_target.x > 0.0f ? 1.0f : 0.0f;
+    float depth = 1.0f / (1.0f + depth_gain * dist);
+    float dx = yaw - center_x;
+    float dy = pitch - center_y;
+    float h = expf(-0.5f * (dx / sigma_x) * (dx / sigma_x));
+    float v = expf(-0.5f * (dy / sigma_y) * (dy / sigma_y));
+    return front * depth * h * v;
+}
+
+__device__ void minimal_vision_pixel_rgb_dev(const DroneCudaState* s, const DroneCudaCtx& cfg,
+                                             int px, int py,
+                                             float* red, float* green, float* blue) {
+    float4 q_inv = quat_inverse_dev(s->quat);
+    float fov = fmaxf(fabsf(cfg.minimal_vision_fov), 0.1f);
+    float vfov = fmaxf(fabsf(cfg.minimal_vision_vfov), 0.1f);
+    float sigma = fmaxf(fabsf(cfg.minimal_vision_sigma), 0.01f);
+    float depth_gain = fmaxf(fabsf(cfg.minimal_vision_depth_gain), 0.0f);
+    float sigma_y = DRONE_MINIMAL_VISION_HEIGHT <= 1
+        ? fmaxf(0.35f * vfov, 1e-3f)
+        : fmaxf(sigma * vfov / fov, 0.01f);
+    float center_y = DRONE_MINIMAL_VISION_HEIGHT <= 1
+        ? 0.0f
+        : 0.5f * vfov - ((float)py + 0.5f) * (vfov / (float)DRONE_MINIMAL_VISION_HEIGHT);
+    float center_x = -0.5f * fov + ((float)px + 0.5f) * (fov / (float)DRONE_MINIMAL_VISION_WIDTH);
+
+    if (cfg.task == DRONE_TASK_RACE && s->buffer_size > 0) {
+        int idx0 = s->buffer_idx;
+        if (idx0 < 0) idx0 = 0;
+        if (idx0 >= s->buffer_size) idx0 = s->buffer_size - 1;
+        int idx1 = s->buffer_size > 1 ? (idx0 + 1) % s->buffer_size : idx0;
+        int idx2 = s->buffer_size > 2 ? (idx0 + 2) % s->buffer_size : idx1;
+        *red = minimal_vision_blob_intensity_dev(q_inv, s->pos, s->ring_pos[idx0],
+                                                 center_x, center_y, sigma, sigma_y, depth_gain);
+        *green = s->buffer_size > 1
+            ? 0.85f * minimal_vision_blob_intensity_dev(q_inv, s->pos, s->ring_pos[idx1],
+                                                        center_x, center_y, sigma, sigma_y, depth_gain)
+            : 0.0f;
+        *blue = s->buffer_size > 2
+            ? 0.70f * minimal_vision_blob_intensity_dev(q_inv, s->pos, s->ring_pos[idx2],
+                                                        center_x, center_y, sigma, sigma_y, depth_gain)
+            : 0.0f;
+        return;
+    }
+
+    float3 to_target_world = sub3_dev(s->target_pos, s->pos);
+    float3 to_target = quat_rotate_dev(q_inv, to_target_world);
+    float xy = sqrtf(to_target.x * to_target.x + to_target.y * to_target.y);
+    float yaw = atan2f(to_target.y, fmaxf(to_target.x, 1e-3f));
+    float pitch = atan2f(to_target.z, fmaxf(xy, 1e-3f));
+    float yaw_norm = clampf_dev(yaw / (0.5f * fov), -1.0f, 1.0f);
+    float pitch_norm = clampf_dev(pitch / (0.5f * vfov), -1.0f, 1.0f);
+    float intensity = minimal_vision_blob_intensity_dev(q_inv, s->pos, s->target_pos,
+                                                        center_x, center_y, sigma, sigma_y, depth_gain);
+    *red = intensity * (0.65f + 0.35f * clampf_dev(-yaw_norm, 0.0f, 1.0f));
+    *green = intensity * (0.65f + 0.35f * clampf_dev(yaw_norm, 0.0f, 1.0f));
+    *blue = intensity * (0.55f + 0.45f * (1.0f - fabsf(pitch_norm)));
+}
+
+__device__ void compute_minimal_vision_obs_dev(const DroneCudaState* s, const DroneCudaCtx& cfg,
+                                               curandStatePhilox4_32_10_t* rng, float* obs) {
+    float noise = clampf_dev(fabsf(cfg.minimal_vision_noise), 0.0f, 1.0f);
+    float distractors = clampf_dev(fabsf(cfg.minimal_vision_distractors), 0.0f, 1.0f);
+
+    for (int py = 0; py < DRONE_MINIMAL_VISION_HEIGHT; py++) {
+        for (int px = 0; px < DRONE_MINIMAL_VISION_WIDTH; px++) {
+        float red = 0.0f;
+        float green = 0.0f;
+        float blue = 0.0f;
+        minimal_vision_pixel_rgb_dev(s, cfg, px, py, &red, &green, &blue);
+
+        if (distractors > 0.0f && rndf_dev(0.0f, 1.0f, rng) < 0.03f * distractors) {
+            red += distractors * rndf_dev(0.0f, 0.25f, rng);
+            green += distractors * rndf_dev(0.0f, 0.25f, rng);
+            blue += distractors * rndf_dev(0.0f, 0.25f, rng);
+        }
+        if (noise > 0.0f) {
+            red += rndf_dev(-noise, noise, rng);
+            green += rndf_dev(-noise, noise, rng);
+            blue += rndf_dev(-noise, noise, rng);
+        }
+
+        int out = 3 * (py * DRONE_MINIMAL_VISION_WIDTH + px);
+        obs[out + 0] = clampf_dev(red, 0.0f, 1.0f);
+        obs[out + 1] = clampf_dev(green, 0.0f, 1.0f);
+        obs[out + 2] = clampf_dev(blue, 0.0f, 1.0f);
+        }
+    }
+}
+
+__device__ void record_retina_diagnostics_dev(DroneCudaState* s, const DroneCudaCtx& cfg) {
+    float4 q_inv = quat_inverse_dev(s->quat);
+    float3 to_target_world = sub3_dev(s->target_pos, s->pos);
+    float3 to_target = quat_rotate_dev(q_inv, to_target_world);
+
+    float fov = fmaxf(fabsf(cfg.minimal_vision_fov), 0.1f);
+    float vfov = fmaxf(fabsf(cfg.minimal_vision_vfov), 0.1f);
+    float sigma = fmaxf(fabsf(cfg.minimal_vision_sigma), 0.01f);
+    float depth_gain = fmaxf(fabsf(cfg.minimal_vision_depth_gain), 0.0f);
+    float dist = norm3_dev(to_target_world);
+    float xy = sqrtf(to_target.x * to_target.x + to_target.y * to_target.y);
+    float yaw = atan2f(to_target.y, fmaxf(to_target.x, 1e-3f));
+    float pitch = atan2f(to_target.z, fmaxf(xy, 1e-3f));
+    float front = to_target.x > 0.0f ? 1.0f : 0.0f;
+    float depth = 1.0f / (1.0f + depth_gain * dist);
+    float yaw_norm = clampf_dev(yaw / (0.5f * fov), -1.0f, 1.0f);
+    float pitch_norm = clampf_dev(pitch / (0.5f * vfov), -1.0f, 1.0f);
+    float sigma_y = DRONE_MINIMAL_VISION_HEIGHT <= 1
+        ? fmaxf(0.35f * vfov, 1e-3f)
+        : fmaxf(sigma * vfov / fov, 0.01f);
+
+    float rgb_sum = 0.0f;
+    float rgb_sq_sum = 0.0f;
+    float bucket_energy[3] = {0.0f, 0.0f, 0.0f};
+    for (int py = 0; py < DRONE_MINIMAL_VISION_HEIGHT; py++) {
+        for (int px = 0; px < DRONE_MINIMAL_VISION_WIDTH; px++) {
+            float red = 0.0f;
+            float green = 0.0f;
+            float blue = 0.0f;
+            minimal_vision_pixel_rgb_dev(s, cfg, px, py, &red, &green, &blue);
+            red = clampf_dev(red, 0.0f, 1.0f);
+            green = clampf_dev(green, 0.0f, 1.0f);
+            blue = clampf_dev(blue, 0.0f, 1.0f);
+            float px_energy = red * red + green * green + blue * blue;
+            rgb_sum += red + green + blue;
+            rgb_sq_sum += px_energy;
+            int bucket = (3 * px) / DRONE_MINIMAL_VISION_WIDTH;
+            bucket = bucket < 0 ? 0 : (bucket > 2 ? 2 : bucket);
+            bucket_energy[bucket] += px_energy;
+        }
+    }
+
+    float inv_channels = 1.0f / (float)DRONE_MINIMAL_VISION_OBS_SIZE;
+    float mean = rgb_sum * inv_channels;
+    float energy = rgb_sq_sum * inv_channels;
+    float var = fmaxf(0.0f, energy - mean * mean);
+    float best = bucket_energy[0];
+    int best_idx = 0;
+    if (bucket_energy[1] > best) { best = bucket_energy[1]; best_idx = 1; }
+    if (bucket_energy[2] > best) { best = bucket_energy[2]; best_idx = 2; }
+    float argmax = best > 1e-8f ? (float)best_idx : -1.0f;
+
+    s->target_in_fov_sum += (front > 0.0f && fabsf(yaw) <= 0.5f * fov
+        && fabsf(pitch) <= 0.5f * vfov) ? 1.0f : 0.0f;
+    s->retina_rgb_mean_sum += mean;
+    s->retina_rgb_std_sum += sqrtf(var);
+    s->retina_energy_sum += energy;
+    s->retina_argmax_sum += argmax;
+    if (argmax == 0.0f) s->retina_argmax_left_count += 1.0f;
+    else if (argmax == 1.0f) s->retina_argmax_center_count += 1.0f;
+    else if (argmax == 2.0f) s->retina_argmax_right_count += 1.0f;
+    s->bearing_error_sum += sqrtf(yaw * yaw + pitch * pitch);
+    s->distance_to_target_sum += dist;
+    s->retina_signal_vs_distance_sum += energy * fmaxf(dist, 1e-3f);
+    if (cfg.task == DRONE_TASK_RACE) {
+        int gate_idx = race_clamped_gate_idx_dev(s);
+        if (gate_idx >= 0 && gate_idx < DRONE_GATE_DEBUG_MAX) {
+            float in_fov = (front > 0.0f && fabsf(yaw) <= 0.5f * fov
+                && fabsf(pitch) <= 0.5f * vfov) ? 1.0f : 0.0f;
+            s->gate_time[gate_idx] += 1.0f;
+            s->gate_target_in_fov[gate_idx] += in_fov;
+            s->gate_bearing_error[gate_idx] += sqrtf(yaw * yaw + pitch * pitch);
+            s->gate_distance_to_target[gate_idx] += dist;
+        }
+    }
+}
+
 __device__ void compute_obs_dev(const DroneCudaState* s, const DroneCudaParams* p,
                                 const DroneCudaCtx& cfg, curandStatePhilox4_32_10_t* rng,
                                 float* obs) {
+    #pragma unroll
+    for (int i = 0; i < DRONE_OBS_SIZE; i++) obs[i] = 0.0f;
+
     int idx = 0;
     float4 q = s->quat;
     float4 q_inv = quat_inverse_dev(q);
     float3 linear_vel_body = quat_rotate_dev(q_inv, s->vel);
     float3 to_target_world = sub3_dev(s->target_pos, s->pos);
     float3 to_target = quat_rotate_dev(q_inv, to_target_world);
-    float denom = p->max_vel * 1.7320508f;
-    obs[idx++] = linear_vel_body.x / denom;
-    obs[idx++] = linear_vel_body.y / denom;
-    obs[idx++] = linear_vel_body.z / denom;
-    obs[idx++] = s->omega.x / p->max_omega;
-    obs[idx++] = s->omega.y / p->max_omega;
-    obs[idx++] = s->omega.z / p->max_omega;
-    obs[idx++] = q.x;
-    obs[idx++] = q.y;
-    obs[idx++] = q.z;
-    obs[idx++] = q.w;
-    obs[idx++] = tanhf(to_target.x * 0.1f);
-    obs[idx++] = tanhf(to_target.y * 0.1f);
-    obs[idx++] = tanhf(to_target.z * 0.1f);
-    obs[idx++] = tanhf(to_target.x * 10.0f);
-    obs[idx++] = tanhf(to_target.y * 10.0f);
-    obs[idx++] = tanhf(to_target.z * 10.0f);
-    float3 normal_body = quat_rotate_dev(q_inv, s->target_normal);
-    obs[idx++] = normal_body.x;
-    obs[idx++] = normal_body.y;
-    obs[idx++] = normal_body.z;
-    obs[idx++] = s->rpms[0] / p->max_rpm;
-    obs[idx++] = s->rpms[1] / p->max_rpm;
-    obs[idx++] = s->rpms[2] / p->max_rpm;
-    obs[idx++] = s->rpms[3] / p->max_rpm;
 
-    if (cfg.sensor_noise > 0.0f) {
+    if (!(cfg.minimal_vision_only > 0.0f)) {
+        float denom = p->max_vel * 1.7320508f;
+        obs[idx++] = linear_vel_body.x / denom;
+        obs[idx++] = linear_vel_body.y / denom;
+        obs[idx++] = linear_vel_body.z / denom;
+        obs[idx++] = s->omega.x / p->max_omega;
+        obs[idx++] = s->omega.y / p->max_omega;
+        obs[idx++] = s->omega.z / p->max_omega;
+        obs[idx++] = q.x;
+        obs[idx++] = q.y;
+        obs[idx++] = q.z;
+        obs[idx++] = q.w;
+        obs[idx++] = tanhf(to_target.x * 0.1f);
+        obs[idx++] = tanhf(to_target.y * 0.1f);
+        obs[idx++] = tanhf(to_target.z * 0.1f);
+        obs[idx++] = tanhf(to_target.x * 10.0f);
+        obs[idx++] = tanhf(to_target.y * 10.0f);
+        obs[idx++] = tanhf(to_target.z * 10.0f);
+        float3 normal_body = quat_rotate_dev(q_inv, s->target_normal);
+        obs[idx++] = normal_body.x;
+        obs[idx++] = normal_body.y;
+        obs[idx++] = normal_body.z;
+        obs[idx++] = s->rpms[0] / p->max_rpm;
+        obs[idx++] = s->rpms[1] / p->max_rpm;
+        obs[idx++] = s->rpms[2] / p->max_rpm;
+        obs[idx++] = s->rpms[3] / p->max_rpm;
+    }
+
+    if (cfg.sensor_noise > 0.0f && !(cfg.minimal_vision_only > 0.0f)) {
         float noise = fminf(fabsf(cfg.sensor_noise), 1.0f);
         #pragma unroll
-        for (int i = 0; i < DRONE_OBS_SIZE; i++) {
+        for (int i = 0; i < DRONE_STATE_OBS_SIZE; i++) {
             obs[i] = clampf_dev(obs[i] + rndf_dev(-noise, noise, rng), -2.0f, 2.0f);
         }
+    }
+    if (!(cfg.minimal_vision_only > 0.0f) && cfg.minimal_vision_mask_target > 0.0f) {
+        #pragma unroll
+        for (int i = 10; i < 19; i++) obs[i] = 0.0f;
+    }
+
+    if (cfg.minimal_vision_enabled > 0.0f) {
+        int offset = cfg.minimal_vision_only > 0.0f ? 0 : DRONE_STATE_OBS_SIZE;
+        compute_minimal_vision_obs_dev(s, cfg, rng, obs + offset);
     }
 }
 
 __device__ void record_step_metrics_dev(DroneCudaState* s, const DroneCudaParams* p,
                                         const float raw_actions[4], float r_dist,
                                         float r_hover, float r_shaping, float r_omega,
-                                        float r_omega_xy, float r_omega_z,
+                                        float r_omega_xy, float r_omega_z, float r_terminal,
                                         float action_delta_mean,
                                         float reset_action_jump) {
     float action_abs_sum = 0.0f;
@@ -1661,6 +2417,7 @@ __device__ void record_step_metrics_dev(DroneCudaState* s, const DroneCudaParams
     s->r_omega_sum += r_omega;
     s->r_omega_xy_sum += r_omega_xy;
     s->r_omega_z_sum += r_omega_z;
+    s->r_terminal_sum += r_terminal;
     #pragma unroll
     for (int i = 0; i < 4; i++) s->prev_action[i] = raw_actions[i];
     s->has_prev_action = 1;
@@ -1668,12 +2425,32 @@ __device__ void record_step_metrics_dev(DroneCudaState* s, const DroneCudaParams
 
 __device__ void log_done_dev(DroneCudaLog* log, const DroneCudaState* s,
                              const DroneCudaParams* p, const DroneCudaCtx& cfg,
-                             bool oob, bool timeout) {
+                             bool oob, bool timeout, bool lap_complete) {
     float steps = fmaxf(s->instrumentation_steps, 1.0f);
     atomicAdd(&log->episode_return, s->episode_return);
     atomicAdd(&log->episode_length, (float)s->episode_length);
+    atomicAdd(&log->rings_passed, s->rings_passed);
+    atomicAdd(&log->collisions, s->collisions);
+    atomicAdd(&log->ring_collision, s->ring_collision);
     atomicAdd(&log->oob, oob ? 1.0f : 0.0f);
     atomicAdd(&log->timeout, timeout ? 1.0f : 0.0f);
+    atomicAdd(&log->lap_complete, lap_complete ? 1.0f : 0.0f);
+    if (cfg.task == DRONE_TASK_RACE) {
+        int gate_idx = race_clamped_gate_idx_dev(s);
+        if (gate_idx >= 0 && gate_idx < DRONE_GATE_DEBUG_MAX) {
+            if (oob) atomicAdd(&log->gate_oob_count[gate_idx], 1.0f);
+            if (timeout) atomicAdd(&log->gate_timeout_count[gate_idx], 1.0f);
+        }
+    }
+    if (oob && cfg.task == DRONE_TASK_RACE) {
+        float3 next_gate_pos = race_next_gate_pos_dev(s);
+        atomicAdd(&log->oob_diag_count, 1.0f);
+        atomicAdd(&log->gate_index_at_oob, (float)race_clamped_gate_idx_dev(s));
+        atomicAdd(&log->position_norm_at_oob, norm3_dev(s->pos));
+        atomicAdd(&log->target_gate_position_norm, norm3_dev(s->target_pos));
+        atomicAdd(&log->next_gate_position_norm, norm3_dev(next_gate_pos));
+        atomicAdd(&log->distance_from_track_centerline, race_track_centerline_distance_dev(s));
+    }
     atomicAdd(&log->score, s->hover_score);
     atomicAdd(&log->perf, s->hover_ema);
     atomicAdd(&log->ema_dist, s->ema_dist);
@@ -1710,12 +2487,24 @@ __device__ void log_done_dev(DroneCudaLog* log, const DroneCudaState* s,
     atomicAdd(&log->mean_rpm_FR, s->rpm_sum[1] / steps);
     atomicAdd(&log->mean_rpm_RL, s->rpm_sum[2] / steps);
     atomicAdd(&log->mean_rpm_RR, s->rpm_sum[3] / steps);
+    atomicAdd(&log->target_in_fov_frac, s->target_in_fov_sum / steps);
+    atomicAdd(&log->retina_rgb_mean, s->retina_rgb_mean_sum / steps);
+    atomicAdd(&log->retina_rgb_std, s->retina_rgb_std_sum / steps);
+    atomicAdd(&log->retina_energy, s->retina_energy_sum / steps);
+    atomicAdd(&log->retina_left_center_right_argmax, s->retina_argmax_sum / steps);
+    atomicAdd(&log->retina_argmax_left_frac, s->retina_argmax_left_count / steps);
+    atomicAdd(&log->retina_argmax_center_frac, s->retina_argmax_center_count / steps);
+    atomicAdd(&log->retina_argmax_right_frac, s->retina_argmax_right_count / steps);
+    atomicAdd(&log->bearing_error_to_target, s->bearing_error_sum / steps);
+    atomicAdd(&log->distance_to_target, s->distance_to_target_sum / steps);
+    atomicAdd(&log->retina_signal_vs_distance, s->retina_signal_vs_distance_sum / steps);
     atomicAdd(&log->r_dist, s->r_dist_sum);
     atomicAdd(&log->r_hover, s->r_hover_sum);
     atomicAdd(&log->r_shaping, s->r_shaping_sum);
     atomicAdd(&log->r_omega, s->r_omega_sum);
     atomicAdd(&log->r_omega_xy, s->r_omega_xy_sum);
     atomicAdd(&log->r_omega_z, s->r_omega_z_sum);
+    atomicAdd(&log->r_terminal, s->r_terminal_sum);
     atomicAdd(&log->mass_mult_mean, p->mass_mult);
     atomicAdd(&log->ixx_mult_mean, p->ixx_mult);
     atomicAdd(&log->iyy_mult_mean, p->iyy_mult);
@@ -1744,6 +2533,16 @@ __device__ void log_done_dev(DroneCudaLog* log, const DroneCudaState* s,
     atomicAdd(&log->com_x_mean, p->com_x);
     atomicAdd(&log->com_y_mean, p->com_y);
     atomicAdd(&log->com_z_mean, p->com_z);
+    if (cfg.task == DRONE_TASK_RACE) {
+        for (int gate = 0; gate < DRONE_GATE_DEBUG_MAX; gate++) {
+            atomicAdd(&log->gate_time[gate], s->gate_time[gate]);
+            atomicAdd(&log->gate_target_in_fov[gate], s->gate_target_in_fov[gate]);
+            atomicAdd(&log->gate_bearing_error[gate], s->gate_bearing_error[gate]);
+            atomicAdd(&log->gate_distance_to_target[gate], s->gate_distance_to_target[gate]);
+            atomicAdd(&log->gate_pass_count[gate], s->gate_pass_count[gate]);
+            atomicAdd(&log->gate_collision_count[gate], s->gate_collision_count[gate]);
+        }
+    }
     atomicAdd(&log->n, 1.0f);
 }
 
@@ -1819,6 +2618,42 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
 
     float curr_dist = norm3_dev(sub3_dev(s.target_pos, s.pos));
     float prev_dist = norm3_dev(sub3_dev(s.target_pos, s.prev_pos));
+    bool oob = curr_dist > cfg.oob_radius;
+    bool timeout = s.episode_length >= cfg.horizon;
+    int ring_result = 0;
+    bool lap_complete = false;
+    float r_terminal = 0.0f;
+    if (cfg.task == DRONE_TASK_RACE) {
+        int current_gate_idx = race_clamped_gate_idx_dev(&s);
+        ring_result = check_ring_dev(&s);
+        if (ring_result == 1) {
+            s.rings_passed += 1.0f;
+            s.race_gate_bank += 1.0f;
+            if (current_gate_idx >= 0 && current_gate_idx < DRONE_GATE_DEBUG_MAX) {
+                s.gate_pass_count[current_gate_idx] += 1.0f;
+            }
+            lap_complete = cfg.race_segment_mode >= 1.0f
+                || (s.buffer_size > 0 && s.buffer_idx == s.buffer_size - 1);
+            r_terminal += 0.2f;
+        } else if (ring_result == -1) {
+            s.ring_collision += 1.0f;
+            s.collisions += 1.0f;
+            if (current_gate_idx >= 0 && current_gate_idx < DRONE_GATE_DEBUG_MAX) {
+                s.gate_collision_count[current_gate_idx] += 1.0f;
+            }
+            r_terminal -= 2.0f;
+        }
+        if (oob) {
+            float speed = norm3_dev(s.vel);
+            r_terminal += -10.0f
+                        - s.race_gate_bank
+                        - 0.05f * speed * speed;
+            s.race_gate_bank = 0.0f;
+        } else if (lap_complete || timeout) {
+            r_terminal += s.race_gate_bank;
+            s.race_gate_bank = 0.0f;
+        }
+    }
     float omega = norm3_dev(s.omega);
     float omega_xy = sqrtf(s.omega.x * s.omega.x + s.omega.y * s.omega.y);
     float omega_z = s.omega.z;
@@ -1832,7 +2667,7 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
     float r_omega = r_omega_xy + r_omega_z;
     float r_action_delta = -cfg.alpha_action_delta * action_delta_mean
                          -cfg.alpha_reset_action_delta * reset_action_jump;
-    float reward = r_dist + r_hover + r_shaping + r_omega + r_action_delta;
+    float reward = r_dist + r_hover + r_shaping + r_omega + r_terminal + r_action_delta;
     s.prev_potential = curr;
 
     float h = check_hover_dev(&s, cfg);
@@ -1844,18 +2679,25 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
     s.ema_omega_x = 0.99f * s.ema_omega_x + 0.01f * fabsf(s.omega.x);
     s.ema_omega_y = 0.99f * s.ema_omega_y + 0.01f * fabsf(s.omega.y);
     s.ema_omega_z = 0.99f * s.ema_omega_z + 0.01f * fabsf(s.omega.z);
+    record_retina_diagnostics_dev(&s, cfg);
     record_step_metrics_dev(&s, &p, raw_actions, r_dist, r_hover, r_shaping, r_omega,
-                            r_omega_xy, r_omega_z, action_delta_mean, reset_action_jump);
+                            r_omega_xy, r_omega_z, r_terminal,
+                            action_delta_mean, reset_action_jump);
     s.episode_return += reward;
 
-    bool oob = curr_dist > cfg.oob_radius;
-    bool timeout = s.episode_length >= cfg.horizon;
-    bool done = oob || timeout;
+    if (cfg.task == DRONE_TASK_RACE && ring_result == 1 && !lap_complete) {
+        s.buffer_idx = s.buffer_idx + 1;
+        set_target_race_dev(&s);
+        s.prev_pos = s.pos;
+        s.prev_potential = hover_potential_dev(&s, cfg);
+    }
+
+    bool done = oob || timeout || lap_complete;
     rewards[i] = reward;
     terminals[i] = done ? 1.0f : 0.0f;
 
     if (done) {
-        log_done_dev(cfg.log, &s, &p, cfg, oob, timeout);
+        log_done_dev(cfg.log, &s, &p, cfg, oob, timeout, lap_complete);
         adr_record_done_dev(cfg, &s, timeout);
         reset_one_dev(&s, &p, cfg, &r);
     }
@@ -1872,6 +2714,9 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.total_agents = vec->total_agents;
     ctx.horizon = DRONE_HORIZON;
     ctx.task = (int)dict_float(env_kwargs, "task", 1.0f);
+    ctx.max_rings = (int)dict_float(env_kwargs, "max_rings", 10.0f);
+    if (ctx.max_rings < 1) ctx.max_rings = 1;
+    if (ctx.max_rings > DRONE_CUDA_MAX_RINGS) ctx.max_rings = DRONE_CUDA_MAX_RINGS;
     ctx.alpha_dist = dict_float(env_kwargs, "alpha_dist", 0.782192f);
     ctx.alpha_hover = dict_float(env_kwargs, "alpha_hover", 0.071445f);
     ctx.alpha_shaping = dict_float(env_kwargs, "alpha_shaping", 3.9754f);
@@ -1945,6 +2790,31 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.reset_yaw_range = dict_float(env_kwargs, "reset_yaw_range", DRONE_PI);
     ctx.reset_vel_max = dict_float(env_kwargs, "reset_vel_max", 0.0f);
     ctx.sensor_noise = dict_float(env_kwargs, "sensor_noise", 0.0f);
+    ctx.minimal_vision_enabled = dict_float(env_kwargs, "minimal_vision_enabled", 0.0f);
+    ctx.minimal_vision_only = dict_float(env_kwargs, "minimal_vision_only", 0.0f);
+    ctx.minimal_vision_mask_target = dict_float(env_kwargs, "minimal_vision_mask_target", 0.0f);
+    ctx.minimal_vision_fov = dict_float(env_kwargs, "minimal_vision_fov", 2.0943951f);
+    ctx.minimal_vision_vfov = dict_float(env_kwargs, "minimal_vision_vfov", 1.3962634f);
+    ctx.minimal_vision_sigma = dict_float(env_kwargs, "minimal_vision_sigma", 0.45f);
+    ctx.minimal_vision_depth_gain = dict_float(env_kwargs, "minimal_vision_depth_gain", 0.08f);
+    ctx.minimal_vision_noise = dict_float(env_kwargs, "minimal_vision_noise", 0.0f);
+    ctx.minimal_vision_distractors = dict_float(env_kwargs, "minimal_vision_distractors", 0.0f);
+    ctx.minimal_vision_spawn_visible_target = dict_float(env_kwargs, "minimal_vision_spawn_visible_target", 0.0f);
+    ctx.race_track_mode = dict_float(env_kwargs, "race_track_mode", 0.0f);
+    ctx.race_segment_mode = dict_float(env_kwargs, "race_segment_mode", 0.0f);
+    ctx.race_course_yaw_delta = dict_float(env_kwargs, "race_course_yaw_delta", 0.0f);
+    ctx.race_course_pitch_delta = dict_float(env_kwargs, "race_course_pitch_delta", 0.0f);
+    ctx.race_course_pitch_limit = dict_float(env_kwargs, "race_course_pitch_limit", 0.0f);
+    ctx.race_course_spacing_min = dict_float(env_kwargs, "race_course_spacing_min", 0.0f);
+    ctx.race_course_spacing_max = dict_float(env_kwargs, "race_course_spacing_max", 0.0f);
+    ctx.race_course_dz_max = dict_float(env_kwargs, "race_course_dz_max", 0.0f);
+    ctx.race_reset_start_prob = dict_float(env_kwargs, "race_reset_start_prob", 0.0f);
+    ctx.race_reset_t_min = dict_float(env_kwargs, "race_reset_t_min", 0.0f);
+    ctx.race_reset_t_max = dict_float(env_kwargs, "race_reset_t_max", 0.0f);
+    ctx.race_reset_lateral = dict_float(env_kwargs, "race_reset_lateral", 0.0f);
+    ctx.race_reset_yaw_error_frac = dict_float(env_kwargs, "race_reset_yaw_error_frac", 0.0f);
+    ctx.race_reset_speed_min = dict_float(env_kwargs, "race_reset_speed_min", 0.0f);
+    ctx.race_reset_speed_max = dict_float(env_kwargs, "race_reset_speed_max", 0.0f);
     ctx.action_latency_steps = latency_steps_from_seconds(dict_float(env_kwargs, "action_latency", 0.0f));
     (void)vec_kwargs;
     return ctx;
@@ -2024,8 +2894,8 @@ static DroneCudaAdrState make_host_adr_state(const DroneCudaCtx* ctx) {
 extern "C" void cuda_env_init(StaticVec* vec, Dict* vec_kwargs, Dict* env_kwargs) {
     DroneCudaCtx* ctx = (DroneCudaCtx*)calloc(1, sizeof(DroneCudaCtx));
     *ctx = make_host_ctx(vec, vec_kwargs, env_kwargs);
-    if (ctx->task != 1) {
-        fprintf(stderr, "drone CUDA env currently implements HOVER only; got task=%d\n", ctx->task);
+    if (ctx->task != DRONE_TASK_HOVER && ctx->task != DRONE_TASK_RACE) {
+        fprintf(stderr, "drone CUDA env implements HOVER/RACE only; got task=%d\n", ctx->task);
     }
     CUDA_ENV_CHECK(cudaMalloc((void**)&ctx->states,
                               (size_t)ctx->total_agents * sizeof(DroneCudaState)));
@@ -2080,6 +2950,31 @@ extern "C" void cuda_env_step_all(StaticVec* vec, cudaStream_t stream) {
     cuda_env_step_buffer(vec, 0, vec->total_agents, stream);
 }
 
+static inline void set_gate_debug_log_cuda(Dict* out, const DroneCudaLog* log, int gate,
+                                           const char* time_key, const char* fov_key,
+                                           const char* bearing_key, const char* dist_key,
+                                           const char* pass_key, const char* collision_key,
+                                           const char* timeout_key, const char* oob_key,
+                                           float total_gate_time, float episode_inv) {
+    float gate_time = log->gate_time[gate];
+    float gate_inv = gate_time > 1e-6f ? 1.0f / gate_time : 0.0f;
+    float total_inv = total_gate_time > 1e-6f ? 1.0f / total_gate_time : 0.0f;
+    dict_set(out, time_key, gate_time * total_inv);
+    dict_set(out, fov_key, log->gate_target_in_fov[gate] * gate_inv);
+    dict_set(out, bearing_key, log->gate_bearing_error[gate] * gate_inv);
+    dict_set(out, dist_key, log->gate_distance_to_target[gate] * gate_inv);
+    dict_set(out, pass_key, log->gate_pass_count[gate] * episode_inv);
+    dict_set(out, collision_key, log->gate_collision_count[gate] * episode_inv);
+    dict_set(out, timeout_key, log->gate_timeout_count[gate] * episode_inv);
+    dict_set(out, oob_key, log->gate_oob_count[gate] * episode_inv);
+}
+
+#define SET_GATE_DEBUG_LOG_CUDA(G) \
+    set_gate_debug_log_cuda(out, &h, G, \
+        "g" #G "_time_frac", "g" #G "_fov", "g" #G "_bearing", "g" #G "_dist", \
+        "g" #G "_pass", "g" #G "_collision", "g" #G "_timeout", "g" #G "_oob", \
+        total_gate_time, inv)
+
 extern "C" void cuda_env_log(StaticVec* vec, Dict* out) {
     DroneCudaCtx* ctx = (DroneCudaCtx*)vec->cuda_env;
     if (ctx == NULL) return;
@@ -2094,6 +2989,48 @@ extern "C" void cuda_env_log(StaticVec* vec, Dict* out) {
     dict_set(out, "collisions", h.collisions * inv);
     dict_set(out, "oob", h.oob * inv);
     dict_set(out, "timeout", h.timeout * inv);
+    dict_set(out, "lap_complete", h.lap_complete * inv);
+    dict_set(out, "episode_return", h.episode_return * inv);
+    dict_set(out, "episode_length", h.episode_length * inv);
+    dict_set(out, "ema_dist", h.ema_dist * inv);
+    dict_set(out, "ema_vel", h.ema_vel * inv);
+    dict_set(out, "ema_omega", h.ema_omega * inv);
+    dict_set(out, "action_saturation_frac", h.action_saturation_frac * inv);
+    dict_set(out, "mean_abs_delta_action", h.mean_abs_delta_action * inv);
+    dict_set(out, "target_in_fov_frac", h.target_in_fov_frac * inv);
+    dict_set(out, "retina_energy", h.retina_energy * inv);
+    dict_set(out, "bearing_error_to_target", h.bearing_error_to_target * inv);
+    dict_set(out, "distance_to_target", h.distance_to_target * inv);
+    {
+        float oob_diag_inv = h.oob_diag_count > 1e-6f ? 1.0f / h.oob_diag_count : 0.0f;
+        dict_set(out, "oob_diag_count", h.oob_diag_count * inv);
+        dict_set(out, "gate_index_at_oob", h.gate_index_at_oob * oob_diag_inv);
+        dict_set(out, "distance_from_track_centerline", h.distance_from_track_centerline * oob_diag_inv);
+        float total_gate_time = 0.0f;
+        for (int gate = 0; gate < DRONE_GATE_DEBUG_MAX; gate++) {
+            total_gate_time += h.gate_time[gate];
+        }
+        SET_GATE_DEBUG_LOG_CUDA(0);
+        SET_GATE_DEBUG_LOG_CUDA(1);
+        SET_GATE_DEBUG_LOG_CUDA(2);
+        SET_GATE_DEBUG_LOG_CUDA(3);
+        SET_GATE_DEBUG_LOG_CUDA(4);
+        SET_GATE_DEBUG_LOG_CUDA(5);
+        SET_GATE_DEBUG_LOG_CUDA(6);
+        SET_GATE_DEBUG_LOG_CUDA(7);
+    }
+    dict_set(out, "n", h.n);
+    CUDA_ENV_CHECK(cudaMemset(ctx->log, 0, sizeof(DroneCudaLog)));
+    return;
+
+    dict_set(out, "perf", h.perf * inv);
+    dict_set(out, "score", h.score * inv);
+    dict_set(out, "rings_passed", h.rings_passed * inv);
+    dict_set(out, "ring_collisions", h.ring_collision * inv);
+    dict_set(out, "collisions", h.collisions * inv);
+    dict_set(out, "oob", h.oob * inv);
+    dict_set(out, "timeout", h.timeout * inv);
+    dict_set(out, "lap_complete", h.lap_complete * inv);
     dict_set(out, "episode_return", h.episode_return * inv);
     dict_set(out, "episode_length", h.episode_length * inv);
     dict_set(out, "ema_dist", h.ema_dist * inv);
@@ -2117,6 +3054,17 @@ extern "C" void cuda_env_log(StaticVec* vec, Dict* out) {
     dict_set(out, "mean_rpm_FR", h.mean_rpm_FR * inv);
     dict_set(out, "mean_rpm_RL", h.mean_rpm_RL * inv);
     dict_set(out, "mean_rpm_RR", h.mean_rpm_RR * inv);
+    dict_set(out, "target_in_fov_frac", h.target_in_fov_frac * inv);
+    dict_set(out, "retina_rgb_mean", h.retina_rgb_mean * inv);
+    dict_set(out, "retina_rgb_std", h.retina_rgb_std * inv);
+    dict_set(out, "retina_energy", h.retina_energy * inv);
+    dict_set(out, "retina_left_center_right_argmax", h.retina_left_center_right_argmax * inv);
+    dict_set(out, "retina_argmax_left_frac", h.retina_argmax_left_frac * inv);
+    dict_set(out, "retina_argmax_center_frac", h.retina_argmax_center_frac * inv);
+    dict_set(out, "retina_argmax_right_frac", h.retina_argmax_right_frac * inv);
+    dict_set(out, "bearing_error_to_target", h.bearing_error_to_target * inv);
+    dict_set(out, "distance_to_target", h.distance_to_target * inv);
+    dict_set(out, "retina_signal_vs_distance", h.retina_signal_vs_distance * inv);
     dict_set(out, "r_dist", h.r_dist * inv);
     dict_set(out, "r_hover", h.r_hover * inv);
     dict_set(out, "r_shaping", h.r_shaping * inv);
@@ -2137,6 +3085,25 @@ extern "C" void cuda_env_log(StaticVec* vec, Dict* out) {
     dict_set(out, "com_x_mean", h.com_x_mean * inv);
     dict_set(out, "com_y_mean", h.com_y_mean * inv);
     dict_set(out, "com_z_mean", h.com_z_mean * inv);
+    float oob_diag_inv = h.oob_diag_count > 1e-6f ? 1.0f / h.oob_diag_count : 0.0f;
+    dict_set(out, "oob_diag_count", h.oob_diag_count * inv);
+    dict_set(out, "gate_index_at_oob", h.gate_index_at_oob * oob_diag_inv);
+    dict_set(out, "position_norm_at_oob", h.position_norm_at_oob * oob_diag_inv);
+    dict_set(out, "target_gate_position_norm", h.target_gate_position_norm * oob_diag_inv);
+    dict_set(out, "next_gate_position_norm", h.next_gate_position_norm * oob_diag_inv);
+    dict_set(out, "distance_from_track_centerline", h.distance_from_track_centerline * oob_diag_inv);
+    float total_gate_time = 0.0f;
+    for (int gate = 0; gate < DRONE_GATE_DEBUG_MAX; gate++) {
+        total_gate_time += h.gate_time[gate];
+    }
+    SET_GATE_DEBUG_LOG_CUDA(0);
+    SET_GATE_DEBUG_LOG_CUDA(1);
+    SET_GATE_DEBUG_LOG_CUDA(2);
+    SET_GATE_DEBUG_LOG_CUDA(3);
+    SET_GATE_DEBUG_LOG_CUDA(4);
+    SET_GATE_DEBUG_LOG_CUDA(5);
+    SET_GATE_DEBUG_LOG_CUDA(6);
+    SET_GATE_DEBUG_LOG_CUDA(7);
     if (ctx->adr != NULL) {
         DroneCudaAdrState adr;
         CUDA_ENV_CHECK(cudaMemcpy(&adr, ctx->adr, sizeof(adr), cudaMemcpyDeviceToHost));

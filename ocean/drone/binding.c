@@ -1,7 +1,9 @@
 #include "drone.h"
 #include "render.h"
 
-#define OBS_SIZE 23
+#include <stdio.h>
+
+#define OBS_SIZE DRONE_OBS_SIZE
 #define NUM_ATNS 4
 #define ACT_SIZES {1, 1, 1, 1}
 #define OBS_TENSOR_T FloatTensor
@@ -91,8 +93,58 @@ void my_init(Env* env, Dict* kwargs) {
     env->reset_vel_max = dict_get(kwargs, "reset_vel_max")->value;
     env->action_latency = dict_get(kwargs, "action_latency")->value;
     env->sensor_noise = dict_get(kwargs, "sensor_noise")->value;
+    env->minimal_vision_enabled = dict_get_default(kwargs, "minimal_vision_enabled", 0.0f);
+    env->minimal_vision_only = dict_get_default(kwargs, "minimal_vision_only", 0.0f);
+    env->minimal_vision_mask_target = dict_get_default(kwargs, "minimal_vision_mask_target", 0.0f);
+    env->minimal_vision_fov = dict_get_default(kwargs, "minimal_vision_fov", 2.0943951f);
+    env->minimal_vision_vfov = dict_get_default(kwargs, "minimal_vision_vfov", 1.3962634f);
+    env->minimal_vision_sigma = dict_get_default(kwargs, "minimal_vision_sigma", 0.45f);
+    env->minimal_vision_depth_gain = dict_get_default(kwargs, "minimal_vision_depth_gain", 0.08f);
+    env->minimal_vision_noise = dict_get_default(kwargs, "minimal_vision_noise", 0.0f);
+    env->minimal_vision_distractors = dict_get_default(kwargs, "minimal_vision_distractors", 0.0f);
+    env->minimal_vision_spawn_visible_target = dict_get_default(kwargs, "minimal_vision_spawn_visible_target", 0.0f);
+    env->race_track_mode = dict_get_default(kwargs, "race_track_mode", 0.0f);
+    env->race_segment_mode = dict_get_default(kwargs, "race_segment_mode", 0.0f);
+    env->race_course_yaw_delta = dict_get_default(kwargs, "race_course_yaw_delta", 0.0f);
+    env->race_course_pitch_delta = dict_get_default(kwargs, "race_course_pitch_delta", 0.0f);
+    env->race_course_pitch_limit = dict_get_default(kwargs, "race_course_pitch_limit", 0.0f);
+    env->race_course_spacing_min = dict_get_default(kwargs, "race_course_spacing_min", 0.0f);
+    env->race_course_spacing_max = dict_get_default(kwargs, "race_course_spacing_max", 0.0f);
+    env->race_course_dz_max = dict_get_default(kwargs, "race_course_dz_max", 0.0f);
+    env->race_reset_start_prob = dict_get_default(kwargs, "race_reset_start_prob", 0.0f);
+    env->race_reset_t_min = dict_get_default(kwargs, "race_reset_t_min", 0.0f);
+    env->race_reset_t_max = dict_get_default(kwargs, "race_reset_t_max", 0.0f);
+    env->race_reset_lateral = dict_get_default(kwargs, "race_reset_lateral", 0.0f);
+    env->race_reset_yaw_error_frac = dict_get_default(kwargs, "race_reset_yaw_error_frac", 0.0f);
+    env->race_reset_speed_min = dict_get_default(kwargs, "race_reset_speed_min", 0.0f);
+    env->race_reset_speed_max = dict_get_default(kwargs, "race_reset_speed_max", 0.0f);
     init(env);
 }
+
+static inline void set_gate_debug_log(Dict* out, const Log* log, int gate,
+                                      const char* time_key, const char* fov_key,
+                                      const char* bearing_key, const char* dist_key,
+                                      const char* pass_key, const char* collision_key,
+                                      const char* timeout_key, const char* oob_key,
+                                      float total_gate_time) {
+    float gate_time = log->gate_time[gate];
+    float gate_inv = gate_time > 1e-6f ? 1.0f / gate_time : 0.0f;
+    float total_inv = total_gate_time > 1e-6f ? 1.0f / total_gate_time : 0.0f;
+    dict_set(out, time_key, gate_time * total_inv);
+    dict_set(out, fov_key, log->gate_target_in_fov[gate] * gate_inv);
+    dict_set(out, bearing_key, log->gate_bearing_error[gate] * gate_inv);
+    dict_set(out, dist_key, log->gate_distance_to_target[gate] * gate_inv);
+    dict_set(out, pass_key, log->gate_pass_count[gate]);
+    dict_set(out, collision_key, log->gate_collision_count[gate]);
+    dict_set(out, timeout_key, log->gate_timeout_count[gate]);
+    dict_set(out, oob_key, log->gate_oob_count[gate]);
+}
+
+#define SET_GATE_DEBUG_LOG(G) \
+    set_gate_debug_log(out, log, G, \
+        "g" #G "_time_frac", "g" #G "_fov", "g" #G "_bearing", "g" #G "_dist", \
+        "g" #G "_pass", "g" #G "_collision", "g" #G "_timeout", "g" #G "_oob", \
+        total_gate_time)
 
 void my_log(Log* log, Dict* out) {
     dict_set(out, "perf", log->perf);
@@ -102,6 +154,46 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "collisions", log->collisions);
     dict_set(out, "oob", log->oob);
     dict_set(out, "timeout", log->timeout);
+    dict_set(out, "lap_complete", log->lap_complete);
+    dict_set(out, "episode_return", log->episode_return);
+    dict_set(out, "episode_length", log->episode_length);
+    dict_set(out, "ema_dist", log->ema_dist);
+    dict_set(out, "ema_vel", log->ema_vel);
+    dict_set(out, "ema_omega", log->ema_omega);
+    dict_set(out, "action_saturation_frac", log->action_saturation_frac);
+    dict_set(out, "mean_abs_delta_action", log->mean_abs_delta_action);
+    dict_set(out, "target_in_fov_frac", log->target_in_fov_frac);
+    dict_set(out, "retina_energy", log->retina_energy);
+    dict_set(out, "bearing_error_to_target", log->bearing_error_to_target);
+    dict_set(out, "distance_to_target", log->distance_to_target);
+    {
+        float oob_diag_inv = log->oob_diag_count > 1e-6f ? 1.0f / log->oob_diag_count : 0.0f;
+        dict_set(out, "oob_diag_count", log->oob_diag_count);
+        dict_set(out, "gate_index_at_oob", log->gate_index_at_oob * oob_diag_inv);
+        dict_set(out, "distance_from_track_centerline", log->distance_from_track_centerline * oob_diag_inv);
+        float total_gate_time = 0.0f;
+        for (int gate = 0; gate < DRONE_GATE_DEBUG_MAX; gate++) {
+            total_gate_time += log->gate_time[gate];
+        }
+        SET_GATE_DEBUG_LOG(0);
+        SET_GATE_DEBUG_LOG(1);
+        SET_GATE_DEBUG_LOG(2);
+        SET_GATE_DEBUG_LOG(3);
+        SET_GATE_DEBUG_LOG(4);
+        SET_GATE_DEBUG_LOG(5);
+        SET_GATE_DEBUG_LOG(6);
+        SET_GATE_DEBUG_LOG(7);
+    }
+    return;
+
+    dict_set(out, "perf", log->perf);
+    dict_set(out, "score", log->score);
+    dict_set(out, "rings_passed", log->rings_passed);
+    dict_set(out, "ring_collisions", log->ring_collision);
+    dict_set(out, "collisions", log->collisions);
+    dict_set(out, "oob", log->oob);
+    dict_set(out, "timeout", log->timeout);
+    dict_set(out, "lap_complete", log->lap_complete);
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);
     dict_set(out, "ema_dist", log->ema_dist);
@@ -125,6 +217,17 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "mean_rpm_FR", log->mean_rpm_FR);
     dict_set(out, "mean_rpm_RL", log->mean_rpm_RL);
     dict_set(out, "mean_rpm_RR", log->mean_rpm_RR);
+    dict_set(out, "target_in_fov_frac", log->target_in_fov_frac);
+    dict_set(out, "retina_rgb_mean", log->retina_rgb_mean);
+    dict_set(out, "retina_rgb_std", log->retina_rgb_std);
+    dict_set(out, "retina_energy", log->retina_energy);
+    dict_set(out, "retina_left_center_right_argmax", log->retina_left_center_right_argmax);
+    dict_set(out, "retina_argmax_left_frac", log->retina_argmax_left_frac);
+    dict_set(out, "retina_argmax_center_frac", log->retina_argmax_center_frac);
+    dict_set(out, "retina_argmax_right_frac", log->retina_argmax_right_frac);
+    dict_set(out, "bearing_error_to_target", log->bearing_error_to_target);
+    dict_set(out, "distance_to_target", log->distance_to_target);
+    dict_set(out, "retina_signal_vs_distance", log->retina_signal_vs_distance);
     dict_set(out, "r_dist", log->r_dist);
     dict_set(out, "r_hover", log->r_hover);
     dict_set(out, "r_shaping", log->r_shaping);
@@ -145,6 +248,25 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "com_x_mean", log->com_x_mean);
     dict_set(out, "com_y_mean", log->com_y_mean);
     dict_set(out, "com_z_mean", log->com_z_mean);
+    float oob_diag_inv = log->oob_diag_count > 1e-6f ? 1.0f / log->oob_diag_count : 0.0f;
+    dict_set(out, "oob_diag_count", log->oob_diag_count);
+    dict_set(out, "gate_index_at_oob", log->gate_index_at_oob * oob_diag_inv);
+    dict_set(out, "position_norm_at_oob", log->position_norm_at_oob * oob_diag_inv);
+    dict_set(out, "target_gate_position_norm", log->target_gate_position_norm * oob_diag_inv);
+    dict_set(out, "next_gate_position_norm", log->next_gate_position_norm * oob_diag_inv);
+    dict_set(out, "distance_from_track_centerline", log->distance_from_track_centerline * oob_diag_inv);
+    float total_gate_time = 0.0f;
+    for (int gate = 0; gate < DRONE_GATE_DEBUG_MAX; gate++) {
+        total_gate_time += log->gate_time[gate];
+    }
+    SET_GATE_DEBUG_LOG(0);
+    SET_GATE_DEBUG_LOG(1);
+    SET_GATE_DEBUG_LOG(2);
+    SET_GATE_DEBUG_LOG(3);
+    SET_GATE_DEBUG_LOG(4);
+    SET_GATE_DEBUG_LOG(5);
+    SET_GATE_DEBUG_LOG(6);
+    SET_GATE_DEBUG_LOG(7);
 }
 
 typedef struct DroneDebugState {

@@ -56,6 +56,19 @@
 #define RING_RADIUS 2.0f
 #define V_TARGET 0.05f
 
+#define DRONE_STATE_OBS_SIZE 23
+#ifndef DRONE_MINIMAL_VISION_WIDTH
+#define DRONE_MINIMAL_VISION_WIDTH 3
+#endif
+#ifndef DRONE_MINIMAL_VISION_HEIGHT
+#define DRONE_MINIMAL_VISION_HEIGHT 1
+#endif
+#define DRONE_MINIMAL_VISION_PIXELS (DRONE_MINIMAL_VISION_WIDTH * DRONE_MINIMAL_VISION_HEIGHT)
+#define DRONE_MINIMAL_VISION_CHANNELS 3
+#define DRONE_MINIMAL_VISION_OBS_SIZE (DRONE_MINIMAL_VISION_PIXELS * DRONE_MINIMAL_VISION_CHANNELS)
+#define DRONE_OBS_SIZE (DRONE_STATE_OBS_SIZE + DRONE_MINIMAL_VISION_OBS_SIZE)
+#define DRONE_GATE_DEBUG_MAX 8
+
 // Core Parameters
 #define DT 0.002f // 500 Hz
 #define ACTION_SUBSTEPS 5
@@ -103,6 +116,17 @@ struct Log {
     float mean_rpm_FR;
     float mean_rpm_RL;
     float mean_rpm_RR;
+    float target_in_fov_frac;
+    float retina_rgb_mean;
+    float retina_rgb_std;
+    float retina_energy;
+    float retina_left_center_right_argmax;
+    float retina_argmax_left_frac;
+    float retina_argmax_center_frac;
+    float retina_argmax_right_frac;
+    float bearing_error_to_target;
+    float distance_to_target;
+    float retina_signal_vs_distance;
     float r_dist;
     float r_hover;
     float r_shaping;
@@ -123,6 +147,21 @@ struct Log {
     float com_x_mean;
     float com_y_mean;
     float com_z_mean;
+    float lap_complete;
+    float oob_diag_count;
+    float gate_index_at_oob;
+    float position_norm_at_oob;
+    float target_gate_position_norm;
+    float next_gate_position_norm;
+    float distance_from_track_centerline;
+    float gate_time[DRONE_GATE_DEBUG_MAX];
+    float gate_target_in_fov[DRONE_GATE_DEBUG_MAX];
+    float gate_bearing_error[DRONE_GATE_DEBUG_MAX];
+    float gate_distance_to_target[DRONE_GATE_DEBUG_MAX];
+    float gate_pass_count[DRONE_GATE_DEBUG_MAX];
+    float gate_collision_count[DRONE_GATE_DEBUG_MAX];
+    float gate_timeout_count[DRONE_GATE_DEBUG_MAX];
+    float gate_oob_count[DRONE_GATE_DEBUG_MAX];
     float n;
 };
 
@@ -253,7 +292,9 @@ typedef struct {
     int episode_length;
     float score;
     float collisions;
+    float ring_collision;
     int rings_passed;
+    float race_gate_bank;
     float hover_score;
     float prev_potential;
     float hover_ema;
@@ -271,6 +312,25 @@ typedef struct {
     float motor_clip_high_count;
     float rpm_sum[4];
     float instrumentation_steps;
+    float target_in_fov_sum;
+    float retina_rgb_mean_sum;
+    float retina_rgb_std_sum;
+    float retina_energy_sum;
+    float retina_argmax_sum;
+    float retina_argmax_left_count;
+    float retina_argmax_center_count;
+    float retina_argmax_right_count;
+    float bearing_error_sum;
+    float distance_to_target_sum;
+    float retina_signal_vs_distance_sum;
+    float gate_time[DRONE_GATE_DEBUG_MAX];
+    float gate_target_in_fov[DRONE_GATE_DEBUG_MAX];
+    float gate_bearing_error[DRONE_GATE_DEBUG_MAX];
+    float gate_distance_to_target[DRONE_GATE_DEBUG_MAX];
+    float gate_pass_count[DRONE_GATE_DEBUG_MAX];
+    float gate_collision_count[DRONE_GATE_DEBUG_MAX];
+    float gate_timeout_count[DRONE_GATE_DEBUG_MAX];
+    float gate_oob_count[DRONE_GATE_DEBUG_MAX];
     float r_dist_sum;
     float r_hover_sum;
     float r_shaping_sum;
@@ -373,6 +433,10 @@ static inline Quat scalmul_quat(Quat a, float b) {
 
 static inline float dot3(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 static inline float norm3(Vec3 a) { return sqrtf(dot3(a, a)); }
+static inline Vec3 normalize3_or(Vec3 a, Vec3 fallback) {
+    float n = norm3(a);
+    return n > 1e-6f ? scalmul3(a, 1.0f / n) : fallback;
+}
 
 static inline void clamp3(Vec3* vec, float min, float max) {
     vec->x = clampf(vec->x, min, max);

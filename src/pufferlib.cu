@@ -364,7 +364,7 @@ static inline bool cuda_rollout_graph_env_step_enabled_for_vec(StaticVec* vec, i
 }
 
 Dict* log_environments_impl(PuffeRL& pufferl) {
-    Dict* out = create_dict(128);
+    Dict* out = create_dict(256);
     static_vec_log(pufferl.vec, out);
     return out;
 }

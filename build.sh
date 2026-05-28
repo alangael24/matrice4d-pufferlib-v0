@@ -307,6 +307,13 @@ fi
 mkdir -p build
 STATIC_OBJ="build/libstatic_${ENV}.o"
 STATIC_LIB="build/libstatic_${ENV}.a"
+DRONE_VISION_DEFINES=()
+if [ -n "${DRONE_MINIMAL_VISION_WIDTH:-}" ]; then
+    DRONE_VISION_DEFINES+=("-DDRONE_MINIMAL_VISION_WIDTH=${DRONE_MINIMAL_VISION_WIDTH}")
+fi
+if [ -n "${DRONE_MINIMAL_VISION_HEIGHT:-}" ]; then
+    DRONE_VISION_DEFINES+=("-DDRONE_MINIMAL_VISION_HEIGHT=${DRONE_MINIMAL_VISION_HEIGHT}")
+fi
 
 if [ ! -f "$BINDING_SRC" ]; then
     echo "Error: $BINDING_SRC not found"
@@ -318,6 +325,7 @@ ${CC:-clang} -c "${CLANG_OPT[@]}" $EXTRA_CFLAGS \
     -I. -Isrc -I$SRC_DIR -Ivendor \
     -I./$RAYLIB_NAME/include -I$CUDA_HOME/include \
     -DPLATFORM_DESKTOP \
+    "${DRONE_VISION_DEFINES[@]}" \
     $CUDA_ENV_DEFINE \
     -fno-semantic-interposition -fvisibility=hidden \
     -fPIC -fopenmp \
@@ -355,6 +363,7 @@ if [ -z "$MODE" ]; then
             -I. -Isrc -I$SRC_DIR -Ivendor \
             -I$CUDA_HOME/include \
             $CUDA_ENV_DEFINE \
+            "${DRONE_VISION_DEFINES[@]}" \
             $PRECISION $NVCC_OPT \
             "$CUDA_ENV_SRC" -o "$CUDA_ENV_OBJ"
     fi
@@ -407,6 +416,7 @@ elif [ "$MODE" = "profile" ]; then
             -I. -Isrc -I$SRC_DIR -Ivendor \
             -I$CUDA_HOME/include \
             $CUDA_ENV_DEFINE \
+            "${DRONE_VISION_DEFINES[@]}" \
             $PRECISION $NVCC_OPT \
             "$CUDA_ENV_SRC" -o "$CUDA_ENV_OBJ"
     fi

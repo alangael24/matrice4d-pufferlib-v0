@@ -5,13 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef M4D_DEPLOY_OBS_SIZE
 #define M4D_DEPLOY_OBS_SIZE 23
+#endif
 #define M4D_DEPLOY_NUM_ACTIONS 4
 #define M4D_DEPLOY_HIDDEN_SIZE 128
 #define M4D_DEPLOY_NUM_LAYERS 3
 #define M4D_DEPLOY_DECODER_OUTPUTS (M4D_DEPLOY_NUM_ACTIONS + 1)
 #define M4D_DEPLOY_DEFAULT_RESET_INTERVAL 32
 #define M4D_DEPLOY_DEFAULT_ACTION_SCALE 0.7f
+#ifndef M4D_DEPLOY_ALIGN_WEIGHTS
+#define M4D_DEPLOY_ALIGN_WEIGHTS 1
+#endif
 
 typedef struct {
     int num_agents;
@@ -52,7 +57,11 @@ static inline size_t m4d_deploy_expected_weights(void) {
 }
 
 static inline size_t m4d_deploy_align8(size_t value) {
+#if M4D_DEPLOY_ALIGN_WEIGHTS
     return (value + 7u) & ~((size_t)7u);
+#else
+    return value;
+#endif
 }
 
 static inline float* m4d_deploy_take_aligned(M4DDeploymentRuntime* rt, size_t* off,

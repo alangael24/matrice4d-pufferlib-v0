@@ -111,6 +111,31 @@ struct DroneEnv {
     float reset_vel_max;
     float action_latency;
     float sensor_noise;
+    float minimal_vision_enabled;
+    float minimal_vision_only;
+    float minimal_vision_mask_target;
+    float minimal_vision_fov;
+    float minimal_vision_vfov;
+    float minimal_vision_sigma;
+    float minimal_vision_depth_gain;
+    float minimal_vision_noise;
+    float minimal_vision_distractors;
+    float minimal_vision_spawn_visible_target;
+    float race_track_mode;
+    float race_segment_mode;
+    float race_course_yaw_delta;
+    float race_course_pitch_delta;
+    float race_course_pitch_limit;
+    float race_course_spacing_min;
+    float race_course_spacing_max;
+    float race_course_dz_max;
+    float race_reset_start_prob;
+    float race_reset_t_min;
+    float race_reset_t_max;
+    float race_reset_lateral;
+    float race_reset_yaw_error_frac;
+    float race_reset_speed_min;
+    float race_reset_speed_max;
 };
 
 void init(DroneEnv* env) {
@@ -184,16 +209,68 @@ static inline void record_step_metrics(Drone* agent, float raw_actions[4], float
     agent->has_prev_action = 1;
 }
 
-void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
+static inline int race_clamped_gate_idx(const Drone* agent) {
+    if (agent->buffer_size <= 0) return 0;
+    int idx = agent->buffer_idx;
+    if (idx < 0) return 0;
+    if (idx >= agent->buffer_size) return agent->buffer_size - 1;
+    return idx;
+}
+
+static inline float point_segment_distance3(Vec3 p, Vec3 a, Vec3 b) {
+    Vec3 ab = sub3(b, a);
+    float denom = dot3(ab, ab);
+    if (denom <= 1e-6f) return norm3(sub3(p, b));
+    float t = dot3(sub3(p, a), ab) / denom;
+    t = clampf(t, 0.0f, 1.0f);
+    Vec3 closest = add3(a, scalmul3(ab, t));
+    return norm3(sub3(p, closest));
+}
+
+static inline float race_track_centerline_distance(const Drone* agent) {
+    if (agent->buffer == NULL || agent->buffer_size <= 0) return 0.0f;
+    int idx = race_clamped_gate_idx(agent);
+    int prev_idx = idx > 0 ? idx - 1 : idx;
+    return point_segment_distance3(agent->state.pos,
+                                   agent->buffer[prev_idx].pos,
+                                   agent->buffer[idx].pos);
+}
+
+static inline Vec3 race_next_gate_pos(const Drone* agent) {
+    if (agent->buffer == NULL || agent->buffer_size <= 0) return agent->target->pos;
+    int idx = race_clamped_gate_idx(agent);
+    int next_idx = idx + 1 < agent->buffer_size ? idx + 1 : idx;
+    return agent->buffer[next_idx].pos;
+}
+
+void add_log(DroneEnv* env, int idx, bool oob, bool timeout, bool lap_complete) {
     Drone* agent = &env->agents[idx];
     float steps = fmaxf(agent->instrumentation_steps, 1.0f);
 
     env->log.episode_return += agent->episode_return;
     env->log.episode_length += agent->episode_length;
     env->log.collisions += agent->collisions;
+    env->log.ring_collision += agent->ring_collision;
 
     if (oob) env->log.oob += 1.0f;
     if (timeout) env->log.timeout += 1.0f;
+    if (lap_complete) env->log.lap_complete += 1.0f;
+    if (env->task == RACE) {
+        int gate_idx = race_clamped_gate_idx(agent);
+        if (gate_idx >= 0 && gate_idx < DRONE_GATE_DEBUG_MAX) {
+            if (oob) env->log.gate_oob_count[gate_idx] += 1.0f;
+            if (timeout) env->log.gate_timeout_count[gate_idx] += 1.0f;
+        }
+    }
+    if (oob && env->task == RACE) {
+        Vec3 next_gate_pos = race_next_gate_pos(agent);
+        env->log.oob_diag_count += 1.0f;
+        env->log.gate_index_at_oob += (float)race_clamped_gate_idx(agent);
+        env->log.position_norm_at_oob += norm3(agent->state.pos);
+        env->log.target_gate_position_norm += norm3(agent->target->pos);
+        env->log.next_gate_position_norm += norm3(next_gate_pos);
+        env->log.distance_from_track_centerline += race_track_centerline_distance(agent);
+    }
 
     env->log.score += agent->hover_score;
     env->log.perf += agent->hover_ema;
@@ -232,6 +309,17 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     env->log.mean_rpm_FR += agent->rpm_sum[1] / steps;
     env->log.mean_rpm_RL += agent->rpm_sum[2] / steps;
     env->log.mean_rpm_RR += agent->rpm_sum[3] / steps;
+    env->log.target_in_fov_frac += agent->target_in_fov_sum / steps;
+    env->log.retina_rgb_mean += agent->retina_rgb_mean_sum / steps;
+    env->log.retina_rgb_std += agent->retina_rgb_std_sum / steps;
+    env->log.retina_energy += agent->retina_energy_sum / steps;
+    env->log.retina_left_center_right_argmax += agent->retina_argmax_sum / steps;
+    env->log.retina_argmax_left_frac += agent->retina_argmax_left_count / steps;
+    env->log.retina_argmax_center_frac += agent->retina_argmax_center_count / steps;
+    env->log.retina_argmax_right_frac += agent->retina_argmax_right_count / steps;
+    env->log.bearing_error_to_target += agent->bearing_error_sum / steps;
+    env->log.distance_to_target += agent->distance_to_target_sum / steps;
+    env->log.retina_signal_vs_distance += agent->retina_signal_vs_distance_sum / steps;
     env->log.r_dist += agent->r_dist_sum;
     env->log.r_hover += agent->r_hover_sum;
     env->log.r_shaping += agent->r_shaping_sum;
@@ -268,25 +356,236 @@ void add_log(DroneEnv* env, int idx, bool oob, bool timeout) {
     env->log.com_x_mean += agent->params.com_x;
     env->log.com_y_mean += agent->params.com_y;
     env->log.com_z_mean += agent->params.com_z;
+    if (env->task == RACE) {
+        for (int gate = 0; gate < DRONE_GATE_DEBUG_MAX; gate++) {
+            env->log.gate_time[gate] += agent->gate_time[gate];
+            env->log.gate_target_in_fov[gate] += agent->gate_target_in_fov[gate];
+            env->log.gate_bearing_error[gate] += agent->gate_bearing_error[gate];
+            env->log.gate_distance_to_target[gate] += agent->gate_distance_to_target[gate];
+            env->log.gate_pass_count[gate] += agent->gate_pass_count[gate];
+            env->log.gate_collision_count[gate] += agent->gate_collision_count[gate];
+        }
+    }
 
     env->log.n += 1.0f;
 
     agent->episode_length = 0;
     agent->episode_return = 0.0f;
     agent->collisions = 0.0f;
+    agent->ring_collision = 0.0f;
     agent->score = 0.0f;
     agent->rings_passed = 0.0f;
 }
 
+static inline float minimal_vision_blob_intensity(Quat q_inv, Vec3 pos, Vec3 target_pos,
+                                                  float center_x, float center_y,
+                                                  float sigma_x, float sigma_y,
+                                                  float depth_gain) {
+    Vec3 to_target_world = sub3(target_pos, pos);
+    Vec3 to_target = quat_rotate(q_inv, to_target_world);
+    float dist = norm3(to_target_world);
+    float xy = sqrtf(to_target.x * to_target.x + to_target.y * to_target.y);
+    float yaw = atan2f(to_target.y, fmaxf(to_target.x, 1e-3f));
+    float pitch = atan2f(to_target.z, fmaxf(xy, 1e-3f));
+    float front = to_target.x > 0.0f ? 1.0f : 0.0f;
+    float depth = 1.0f / (1.0f + depth_gain * dist);
+    float dx = yaw - center_x;
+    float dy = pitch - center_y;
+    float h = expf(-0.5f * (dx / sigma_x) * (dx / sigma_x));
+    float v = expf(-0.5f * (dy / sigma_y) * (dy / sigma_y));
+    return front * depth * h * v;
+}
+
+static inline void minimal_vision_pixel_rgb(DroneEnv* env, Drone* agent, int px, int py,
+                                            float* red, float* green, float* blue) {
+    Quat q_inv = quat_inverse(agent->state.quat);
+    float fov = fmaxf(fabsf(env->minimal_vision_fov), 0.1f);
+    float vfov = fmaxf(fabsf(env->minimal_vision_vfov), 0.1f);
+    float sigma = fmaxf(fabsf(env->minimal_vision_sigma), 0.01f);
+    float depth_gain = fmaxf(fabsf(env->minimal_vision_depth_gain), 0.0f);
+    float sigma_y = DRONE_MINIMAL_VISION_HEIGHT <= 1
+        ? fmaxf(0.35f * vfov, 1e-3f)
+        : fmaxf(sigma * vfov / fov, 0.01f);
+    float center_y = DRONE_MINIMAL_VISION_HEIGHT <= 1
+        ? 0.0f
+        : 0.5f * vfov - ((float)py + 0.5f) * (vfov / (float)DRONE_MINIMAL_VISION_HEIGHT);
+    float center_x = -0.5f * fov + ((float)px + 0.5f) * (fov / (float)DRONE_MINIMAL_VISION_WIDTH);
+
+    if (env->task == RACE && agent->buffer_size > 0) {
+        int idx0 = agent->buffer_idx;
+        if (idx0 < 0) idx0 = 0;
+        if (idx0 >= agent->buffer_size) idx0 = agent->buffer_size - 1;
+        int idx1 = agent->buffer_size > 1 ? (idx0 + 1) % agent->buffer_size : idx0;
+        int idx2 = agent->buffer_size > 2 ? (idx0 + 2) % agent->buffer_size : idx1;
+        *red = minimal_vision_blob_intensity(q_inv, agent->state.pos, agent->buffer[idx0].pos,
+                                             center_x, center_y, sigma, sigma_y, depth_gain);
+        *green = agent->buffer_size > 1
+            ? 0.85f * minimal_vision_blob_intensity(q_inv, agent->state.pos, agent->buffer[idx1].pos,
+                                                    center_x, center_y, sigma, sigma_y, depth_gain)
+            : 0.0f;
+        *blue = agent->buffer_size > 2
+            ? 0.70f * minimal_vision_blob_intensity(q_inv, agent->state.pos, agent->buffer[idx2].pos,
+                                                    center_x, center_y, sigma, sigma_y, depth_gain)
+            : 0.0f;
+        return;
+    }
+
+    Vec3 to_target_world = sub3(agent->target->pos, agent->state.pos);
+    Vec3 to_target = quat_rotate(q_inv, to_target_world);
+    float dist = norm3(to_target_world);
+    float xy = sqrtf(to_target.x * to_target.x + to_target.y * to_target.y);
+    float yaw = atan2f(to_target.y, fmaxf(to_target.x, 1e-3f));
+    float pitch = atan2f(to_target.z, fmaxf(xy, 1e-3f));
+    float yaw_norm = clampf(yaw / (0.5f * fov), -1.0f, 1.0f);
+    float pitch_norm = clampf(pitch / (0.5f * vfov), -1.0f, 1.0f);
+    float intensity = minimal_vision_blob_intensity(q_inv, agent->state.pos, agent->target->pos,
+                                                    center_x, center_y, sigma, sigma_y, depth_gain);
+    (void)dist;
+    *red = intensity * (0.65f + 0.35f * clampf(-yaw_norm, 0.0f, 1.0f));
+    *green = intensity * (0.65f + 0.35f * clampf(yaw_norm, 0.0f, 1.0f));
+    *blue = intensity * (0.55f + 0.45f * (1.0f - fabsf(pitch_norm)));
+}
+
+static inline void compute_minimal_vision_observations(DroneEnv* env, Drone* agent, float* obs) {
+    float noise = clampf(fabsf(env->minimal_vision_noise), 0.0f, 1.0f);
+    float distractors = clampf(fabsf(env->minimal_vision_distractors), 0.0f, 1.0f);
+
+    for (int py = 0; py < DRONE_MINIMAL_VISION_HEIGHT; py++) {
+        for (int px = 0; px < DRONE_MINIMAL_VISION_WIDTH; px++) {
+            float red = 0.0f;
+            float green = 0.0f;
+            float blue = 0.0f;
+            minimal_vision_pixel_rgb(env, agent, px, py, &red, &green, &blue);
+
+            if (distractors > 0.0f && rndf(0.0f, 1.0f, &env->rng) < 0.03f * distractors) {
+                red += distractors * rndf(0.0f, 0.25f, &env->rng);
+                green += distractors * rndf(0.0f, 0.25f, &env->rng);
+                blue += distractors * rndf(0.0f, 0.25f, &env->rng);
+            }
+            if (noise > 0.0f) {
+                red += rndf(-noise, noise, &env->rng);
+                green += rndf(-noise, noise, &env->rng);
+                blue += rndf(-noise, noise, &env->rng);
+            }
+
+            int out = 3 * (py * DRONE_MINIMAL_VISION_WIDTH + px);
+            obs[out + 0] = clampf(red, 0.0f, 1.0f);
+            obs[out + 1] = clampf(green, 0.0f, 1.0f);
+            obs[out + 2] = clampf(blue, 0.0f, 1.0f);
+        }
+    }
+}
+
+static inline void record_retina_diagnostics(DroneEnv* env, Drone* agent) {
+    Quat q_inv = quat_inverse(agent->state.quat);
+    Vec3 to_target_world = sub3(agent->target->pos, agent->state.pos);
+    Vec3 to_target = quat_rotate(q_inv, to_target_world);
+
+    float fov = fmaxf(fabsf(env->minimal_vision_fov), 0.1f);
+    float vfov = fmaxf(fabsf(env->minimal_vision_vfov), 0.1f);
+    float sigma = fmaxf(fabsf(env->minimal_vision_sigma), 0.01f);
+    float depth_gain = fmaxf(fabsf(env->minimal_vision_depth_gain), 0.0f);
+    float dist = norm3(to_target_world);
+    float xy = sqrtf(to_target.x * to_target.x + to_target.y * to_target.y);
+    float yaw = atan2f(to_target.y, fmaxf(to_target.x, 1e-3f));
+    float pitch = atan2f(to_target.z, fmaxf(xy, 1e-3f));
+    float front = to_target.x > 0.0f ? 1.0f : 0.0f;
+    float depth = 1.0f / (1.0f + depth_gain * dist);
+    float yaw_norm = clampf(yaw / (0.5f * fov), -1.0f, 1.0f);
+    float pitch_norm = clampf(pitch / (0.5f * vfov), -1.0f, 1.0f);
+    float sigma_y = DRONE_MINIMAL_VISION_HEIGHT <= 1
+        ? fmaxf(0.35f * vfov, 1e-3f)
+        : fmaxf(sigma * vfov / fov, 0.01f);
+
+    float rgb_sum = 0.0f;
+    float rgb_sq_sum = 0.0f;
+    float bucket_energy[3] = {0.0f, 0.0f, 0.0f};
+    for (int py = 0; py < DRONE_MINIMAL_VISION_HEIGHT; py++) {
+        for (int px = 0; px < DRONE_MINIMAL_VISION_WIDTH; px++) {
+        float red = 0.0f;
+        float green = 0.0f;
+        float blue = 0.0f;
+        minimal_vision_pixel_rgb(env, agent, px, py, &red, &green, &blue);
+        float rgb[3] = {
+            clampf(red, 0.0f, 1.0f),
+            clampf(green, 0.0f, 1.0f),
+            clampf(blue, 0.0f, 1.0f),
+        };
+        float px_energy = 0.0f;
+        for (int c = 0; c < 3; c++) {
+            rgb_sum += rgb[c];
+            rgb_sq_sum += rgb[c] * rgb[c];
+            px_energy += rgb[c] * rgb[c];
+        }
+        int bucket = (3 * px) / DRONE_MINIMAL_VISION_WIDTH;
+        if (bucket < 0) bucket = 0;
+        if (bucket > 2) bucket = 2;
+        bucket_energy[bucket] += px_energy;
+        }
+    }
+
+    float inv_channels = 1.0f / (float)DRONE_MINIMAL_VISION_OBS_SIZE;
+    float mean = rgb_sum * inv_channels;
+    float energy = rgb_sq_sum * inv_channels;
+    float var = fmaxf(0.0f, energy - mean * mean);
+    float argmax = -1.0f;
+    float best = bucket_energy[0];
+    int best_idx = 0;
+    for (int bucket = 1; bucket < 3; bucket++) {
+        if (bucket_energy[bucket] > best) {
+            best = bucket_energy[bucket];
+            best_idx = bucket;
+        }
+    }
+    if (best > 1e-8f) argmax = (float)best_idx;
+
+    agent->target_in_fov_sum += (front > 0.0f && fabsf(yaw) <= 0.5f * fov
+        && fabsf(pitch) <= 0.5f * vfov) ? 1.0f : 0.0f;
+    agent->retina_rgb_mean_sum += mean;
+    agent->retina_rgb_std_sum += sqrtf(var);
+    agent->retina_energy_sum += energy;
+    agent->retina_argmax_sum += argmax;
+    if (argmax == 0.0f) agent->retina_argmax_left_count += 1.0f;
+    else if (argmax == 1.0f) agent->retina_argmax_center_count += 1.0f;
+    else if (argmax == 2.0f) agent->retina_argmax_right_count += 1.0f;
+    agent->bearing_error_sum += sqrtf(yaw * yaw + pitch * pitch);
+    agent->distance_to_target_sum += dist;
+    agent->retina_signal_vs_distance_sum += energy * fmaxf(dist, 1e-3f);
+    if (env->task == RACE) {
+        int gate_idx = race_clamped_gate_idx(agent);
+        if (gate_idx >= 0 && gate_idx < DRONE_GATE_DEBUG_MAX) {
+            float in_fov = (front > 0.0f && fabsf(yaw) <= 0.5f * fov
+                && fabsf(pitch) <= 0.5f * vfov) ? 1.0f : 0.0f;
+            agent->gate_time[gate_idx] += 1.0f;
+            agent->gate_target_in_fov[gate_idx] += in_fov;
+            agent->gate_bearing_error[gate_idx] += sqrtf(yaw * yaw + pitch * pitch);
+            agent->gate_distance_to_target[gate_idx] += dist;
+        }
+    }
+}
+
 void compute_observations(DroneEnv* env) {
     for (int i = 0; i < env->num_agents; i++) {
-        float* obs = env->observations + i*23;
-        compute_drone_observations(&env->agents[i], obs);
-        if (env->sensor_noise > 0.0f) {
+        float* obs = env->observations + i * DRONE_OBS_SIZE;
+        for (int j = 0; j < DRONE_OBS_SIZE; j++) obs[j] = 0.0f;
+
+        if (!(env->minimal_vision_only > 0.0f)) {
+            compute_drone_observations(&env->agents[i], obs);
+        }
+
+        if (env->sensor_noise > 0.0f && !(env->minimal_vision_only > 0.0f)) {
             float noise = fminf(fabsf(env->sensor_noise), 1.0f);
-            for (int j = 0; j < 23; j++) {
+            for (int j = 0; j < DRONE_STATE_OBS_SIZE; j++) {
                 obs[j] = clampf(obs[j] + rndf(-noise, noise, &env->rng), -2.0f, 2.0f);
             }
+        }
+        if (!(env->minimal_vision_only > 0.0f) && env->minimal_vision_mask_target > 0.0f) {
+            for (int j = 10; j < 19; j++) obs[j] = 0.0f;
+        }
+
+        if (env->minimal_vision_enabled > 0.0f) {
+            int offset = env->minimal_vision_only > 0.0f ? 0 : DRONE_STATE_OBS_SIZE;
+            compute_minimal_vision_observations(env, &env->agents[i], obs + offset);
         }
     }
 }
@@ -338,6 +637,395 @@ static inline void apply_pal_probe(DroneEnv* env, Drone* agent, float actions[4]
     }
 }
 
+static inline void set_minimal_vision_visible_target(DroneEnv* env, Drone* agent) {
+    if (!(env->minimal_vision_spawn_visible_target > 0.0f)) return;
+    if (!(env->minimal_vision_enabled > 0.0f)) return;
+    if (env->task != HOVER) return;
+
+    float fov = fmaxf(fabsf(env->minimal_vision_fov), 0.1f);
+    float vfov = fmaxf(fabsf(env->minimal_vision_vfov), 0.1f);
+    float dist = rndf(0.45f * env->hover_target_dist, env->hover_target_dist, &env->rng);
+    float yaw = rndf(-0.35f * fov, 0.35f * fov, &env->rng);
+    float pitch = rndf(-0.25f * vfov, 0.25f * vfov, &env->rng);
+    float cp = cosf(pitch);
+    Vec3 body = (Vec3){dist * cp * cosf(yaw), dist * cp * sinf(yaw), dist * sinf(pitch)};
+    Vec3 world = quat_rotate(agent->state.quat, body);
+    Vec3 p = add3(agent->state.pos, world);
+    agent->target->pos = (Vec3){
+        clampf(p.x, -MARGIN_X, MARGIN_X),
+        clampf(p.y, -MARGIN_Y, MARGIN_Y),
+        clampf(p.z, -MARGIN_Z, MARGIN_Z)
+    };
+    agent->target->vel = (Vec3){0.0f, 0.0f, 0.0f};
+    agent->target->normal = (Vec3){0.0f, 0.0f, 1.0f};
+    agent->target->orientation = (Quat){1.0f, 0.0f, 0.0f, 0.0f};
+    agent->target->radius = 0.0f;
+}
+
+static inline Vec3 random_unit_vec3(unsigned int* rng) {
+    float u = rndf(0.0f, 1.0f, rng);
+    float v = rndf(0.0f, 1.0f, rng);
+    float z = 2.0f * v - 1.0f;
+    float a = 2.0f * (float)M_PI * u;
+    float r_xy = sqrtf(fmaxf(0.0f, 1.0f - z * z));
+    return (Vec3){r_xy * cosf(a), r_xy * sinf(a), z};
+}
+
+static inline Vec3 clamp_world_vec3(Vec3 p) {
+    return (Vec3){
+        clampf(p.x, -MARGIN_X, MARGIN_X),
+        clampf(p.y, -MARGIN_Y, MARGIN_Y),
+        clampf(p.z, -MARGIN_Z, MARGIN_Z)
+    };
+}
+
+static inline Vec3 race_course_dir_from_yaw_pitch(float yaw, float pitch) {
+    float cp = cosf(pitch);
+    return normalize3_or((Vec3){
+        cp * cosf(yaw),
+        cp * sinf(yaw),
+        sinf(pitch)
+    }, (Vec3){1.0f, 0.0f, 0.0f});
+}
+
+static inline Vec3 race_course_next_visible_dir(DroneEnv* env, Vec3 prev_dir,
+                                                unsigned int* rng) {
+    prev_dir = normalize3_or(prev_dir, (Vec3){1.0f, 0.0f, 0.0f});
+    float base_yaw = atan2f(prev_dir.y, prev_dir.x);
+    float horiz = sqrtf(prev_dir.x * prev_dir.x + prev_dir.y * prev_dir.y);
+    float base_pitch = atan2f(prev_dir.z, fmaxf(horiz, 1e-3f));
+
+    float max_yaw_delta = env->race_course_yaw_delta > 0.0f
+        ? env->race_course_yaw_delta
+        : fminf(0.38f, 0.18f * fmaxf(fabsf(env->minimal_vision_fov), 0.1f));
+    float max_pitch_delta = env->race_course_pitch_delta > 0.0f
+        ? env->race_course_pitch_delta
+        : fminf(0.20f, 0.12f * fmaxf(fabsf(env->minimal_vision_vfov), 0.1f));
+    float pitch_limit = env->race_course_pitch_limit > 0.0f
+        ? env->race_course_pitch_limit
+        : 0.30f;
+    float yaw = base_yaw + rndf(-max_yaw_delta, max_yaw_delta, rng);
+    float pitch = clampf(base_pitch + rndf(-max_pitch_delta, max_pitch_delta, rng),
+                         -pitch_limit, pitch_limit);
+    return race_course_dir_from_yaw_pitch(yaw, pitch);
+}
+
+static inline Vec3 race_course_side(Vec3 dir) {
+    Vec3 horiz = normalize3_or((Vec3){dir.x, dir.y, 0.0f},
+                               (Vec3){1.0f, 0.0f, 0.0f});
+    return normalize3_or((Vec3){-horiz.y, horiz.x, 0.0f},
+                         (Vec3){0.0f, 1.0f, 0.0f});
+}
+
+static inline Quat race_reset_quat(float yaw, float pitch, float roll) {
+    Quat q_yaw = quat_from_axis_angle((Vec3){0.0f, 0.0f, 1.0f}, yaw);
+    Quat q_pitch = quat_from_axis_angle((Vec3){0.0f, 1.0f, 0.0f}, pitch);
+    Quat q_roll = quat_from_axis_angle((Vec3){1.0f, 0.0f, 0.0f}, roll);
+    Quat q = quat_mul(q_yaw, quat_mul(q_pitch, q_roll));
+    quat_normalize(&q);
+    return q;
+}
+
+static inline int race_swift_like_ring_count(DroneEnv* env) {
+    int n = env->max_rings < 7 ? env->max_rings : 7;
+    return n < 1 ? 1 : n;
+}
+
+static inline Vec3 race_swift_like_base_pos(int idx) {
+    switch (idx) {
+        case 0: return (Vec3){-0.60f, -0.86f, 3.68f};
+        case 1: return (Vec3){ 9.00f,  6.45f, 1.05f};
+        case 2: return (Vec3){ 8.85f, -3.80f, 1.05f};
+        case 3: return (Vec3){-4.30f, -5.60f, 3.40f};
+        case 4: return (Vec3){-4.30f, -5.60f, 1.42f};
+        case 5: return (Vec3){ 4.50f, -0.45f, 1.05f};
+        default: return (Vec3){-1.95f, 6.81f, 1.05f};
+    }
+}
+
+static inline float race_swift_like_base_yaw(int idx) {
+    switch (idx) {
+        case 0: return -0.34906585f;  // -20 deg
+        case 1: return  0.0f;
+        case 2: return -2.26892803f;  // -130 deg
+        case 3: return -(float)M_PI;
+        case 4: return  0.0f;
+        case 5: return  1.39626340f;  // 80 deg
+        default: return -2.61799388f; // -150 deg
+    }
+}
+
+static inline Vec3 rotate_yaw_vec3(Vec3 p, float yaw) {
+    float c = cosf(yaw);
+    float s = sinf(yaw);
+    return (Vec3){
+        c * p.x - s * p.y,
+        s * p.x + c * p.y,
+        p.z
+    };
+}
+
+static inline void set_swift_like_race_course(DroneEnv* env, Drone* agent) {
+    if (env->task != RACE) return;
+
+    int n = race_swift_like_ring_count(env);
+    agent->buffer_size = n;
+    if (agent->buffer_idx >= n) agent->buffer_idx = n - 1;
+    if (agent->buffer_idx < 0) agent->buffer_idx = 0;
+
+    bool randomized = env->race_track_mode >= 2.0f;
+    float global_yaw = randomized ? rndf(-(float)M_PI, (float)M_PI, &env->rng) : 0.0f;
+    float scale = randomized ? rndf(0.90f, 1.10f, &env->rng) : 1.0f;
+    float mirror = randomized && rndf(0.0f, 1.0f, &env->rng) < 0.5f ? -1.0f : 1.0f;
+    Vec3 offset = randomized
+        ? (Vec3){rndf(-3.0f, 3.0f, &env->rng), rndf(-3.0f, 3.0f, &env->rng),
+                 rndf(-0.15f, 0.15f, &env->rng)}
+        : (Vec3){0.0f, 0.0f, 0.0f};
+
+    for (int i = 0; i < n; i++) {
+        Vec3 p = race_swift_like_base_pos(i);
+        p.y *= mirror;
+        p = scalmul3(p, scale);
+        p = rotate_yaw_vec3(p, global_yaw);
+        p = clamp_world_vec3(add3(p, offset));
+
+        float yaw = global_yaw + mirror * race_swift_like_base_yaw(i);
+        Vec3 normal = normalize3_or((Vec3){cosf(yaw), sinf(yaw), 0.0f},
+                                    (Vec3){1.0f, 0.0f, 0.0f});
+
+        env->ring_buffer[i].pos = p;
+        env->ring_buffer[i].normal = normal;
+        env->ring_buffer[i].radius = RING_RADIUS;
+        env->ring_buffer[i].orientation = quat_from_axis_angle((Vec3){0.0f, 0.0f, 1.0f}, yaw);
+        env->ring_buffer[i].vel = (Vec3){0.0f, 0.0f, 0.0f};
+    }
+}
+
+static inline void set_visible_race_course(DroneEnv* env, Drone* agent) {
+    if (env->task != RACE) return;
+    if (env->race_track_mode >= 1.0f) {
+        set_swift_like_race_course(env, agent);
+        return;
+    }
+    if (!(env->minimal_vision_spawn_visible_target > 0.0f)) return;
+    if (!(env->minimal_vision_enabled > 0.0f)) return;
+    if (env->num_agents != 1) return;
+
+    int n = env->max_rings;
+    if (n < 1) return;
+    float segment = fmaxf(env->hover_target_dist, 4.0f);
+    float fov = fmaxf(fabsf(env->minimal_vision_fov), 0.1f);
+    float vfov = fmaxf(fabsf(env->minimal_vision_vfov), 0.1f);
+    Vec3 prev_pos = agent->state.pos;
+    Vec3 prev_dir = normalize3_or(
+        quat_rotate(agent->state.quat, (Vec3){1.0f, 0.0f, 0.0f}),
+        (Vec3){1.0f, 0.0f, 0.0f});
+
+    for (int i = 0; i < n; i++) {
+        Vec3 ring_pos;
+        Vec3 normal;
+        if (i == 0) {
+            float dist = rndf(0.55f * segment, 0.90f * segment, &env->rng);
+            float yaw = rndf(-0.18f * fov, 0.18f * fov, &env->rng);
+            float pitch = rndf(-0.10f * vfov, 0.10f * vfov, &env->rng);
+            float cp = cosf(pitch);
+            Vec3 body = (Vec3){dist * cp * cosf(yaw),
+                               dist * cp * sinf(yaw),
+                               dist * sinf(pitch)};
+            Vec3 world = quat_rotate(agent->state.quat, body);
+            ring_pos = clamp_world_vec3(add3(agent->state.pos, world));
+            normal = normalize3_or(world, prev_dir);
+        } else {
+            normal = race_course_next_visible_dir(env, prev_dir, &env->rng);
+            float spacing_lo = env->race_course_spacing_min > 0.0f
+                ? env->race_course_spacing_min
+                : fmaxf(3.0f, 0.75f * clampf(segment, 3.0f, 5.0f));
+            float spacing_hi = env->race_course_spacing_max > 0.0f
+                ? env->race_course_spacing_max
+                : clampf(segment, 3.0f, 5.0f);
+            spacing_hi = fmaxf(spacing_hi, spacing_lo);
+            float dist = rndf(spacing_lo, spacing_hi, &env->rng);
+            float dz_max = env->race_course_dz_max > 0.0f ? env->race_course_dz_max : 0.35f;
+            float dz = clampf(dist * normal.z, -dz_max, dz_max);
+            float xy = sqrtf(fmaxf(0.0f, dist * dist - dz * dz));
+            Vec3 prev_horiz = normalize3_or((Vec3){prev_dir.x, prev_dir.y, 0.0f},
+                                            (Vec3){1.0f, 0.0f, 0.0f});
+            Vec3 horiz = normalize3_or((Vec3){normal.x, normal.y, 0.0f}, prev_horiz);
+            ring_pos = clamp_world_vec3(add3(prev_pos, (Vec3){
+                horiz.x * xy,
+                horiz.y * xy,
+                dz
+            }));
+            normal = normalize3_or(sub3(ring_pos, prev_pos), normal);
+        }
+        env->ring_buffer[i].pos = ring_pos;
+        env->ring_buffer[i].normal = normal;
+        env->ring_buffer[i].radius = RING_RADIUS;
+        env->ring_buffer[i].orientation = (Quat){1.0f, 0.0f, 0.0f, 0.0f};
+        env->ring_buffer[i].vel = (Vec3){0.0f, 0.0f, 0.0f};
+        prev_pos = ring_pos;
+        prev_dir = normal;
+    }
+}
+
+static inline int race_random_target_idx(DroneEnv* env, int n) {
+    if (n <= 1) return 0;
+    int idx = 1 + (int)floorf(rndf(0.0f, (float)(n - 1), &env->rng));
+    if (idx < 1) idx = 1;
+    if (idx >= n) idx = n - 1;
+    return idx;
+}
+
+static inline void race_set_state_between(DroneEnv* env, Drone* agent, int target_idx,
+                                          float t_min, float t_max, float lateral,
+                                          float yaw_error, float forward_speed) {
+    Target* prev = &agent->buffer[target_idx - 1];
+    Target* target = &agent->buffer[target_idx];
+    Vec3 segment = sub3(target->pos, prev->pos);
+    float len = fmaxf(norm3(segment), 1e-3f);
+    Vec3 dir = normalize3_or(segment, target->normal);
+    Vec3 side = race_course_side(dir);
+    float t = rndf(t_min, t_max, &env->rng);
+    float side_offset = rndf(-lateral, lateral, &env->rng);
+    float z_offset = rndf(-0.15f, 0.15f, &env->rng);
+    agent->state.pos = clamp_world_vec3(add3(prev->pos, add3(
+        scalmul3(dir, len * t),
+        add3(scalmul3(side, side_offset), (Vec3){0.0f, 0.0f, z_offset}))));
+
+    Vec3 to_target = sub3(target->pos, agent->state.pos);
+    float yaw_to_target = atan2f(to_target.y, to_target.x);
+    float roll = rndf(-0.04f, 0.04f, &env->rng);
+    float pitch = rndf(-0.04f, 0.04f, &env->rng);
+    agent->state.quat = race_reset_quat(yaw_to_target - yaw_error, pitch, roll);
+    agent->state.vel = add3(scalmul3(dir, forward_speed),
+                            scalmul3(side, rndf(-0.4f, 0.4f, &env->rng)));
+    agent->state.vel.z += rndf(-0.12f, 0.12f, &env->rng);
+    agent->state.omega = (Vec3){rndf(-0.15f, 0.15f, &env->rng),
+                                rndf(-0.15f, 0.15f, &env->rng),
+                                rndf(-0.20f, 0.20f, &env->rng)};
+    agent->buffer_idx = target_idx;
+}
+
+static inline void race_set_state_segment_start(DroneEnv* env, Drone* agent, int start_idx,
+                                                float t_min, float t_max, float lateral,
+                                                float yaw_error, float forward_speed) {
+    int n = agent->buffer_size;
+    if (n <= 1) return;
+    start_idx = ((start_idx % n) + n) % n;
+    int target_idx = (start_idx + 1) % n;
+    Target* start = &agent->buffer[start_idx];
+    Target* target = &agent->buffer[target_idx];
+    Vec3 segment = sub3(target->pos, start->pos);
+    float len = fmaxf(norm3(segment), 1e-3f);
+    Vec3 dir = normalize3_or(segment, target->normal);
+    Vec3 side = race_course_side(dir);
+    float t = rndf(t_min, t_max, &env->rng);
+    float side_offset = rndf(-lateral, lateral, &env->rng);
+    float z_offset = rndf(-0.12f, 0.12f, &env->rng);
+    agent->state.pos = clamp_world_vec3(add3(start->pos, add3(
+        scalmul3(dir, len * t),
+        add3(scalmul3(side, side_offset), (Vec3){0.0f, 0.0f, z_offset}))));
+
+    Vec3 to_target = sub3(target->pos, agent->state.pos);
+    float yaw_to_target = atan2f(to_target.y, to_target.x);
+    float roll = rndf(-0.04f, 0.04f, &env->rng);
+    float pitch = rndf(-0.04f, 0.04f, &env->rng);
+    agent->state.quat = race_reset_quat(yaw_to_target - yaw_error, pitch, roll);
+    agent->state.vel = add3(scalmul3(dir, forward_speed),
+                            scalmul3(side, rndf(-0.35f, 0.35f, &env->rng)));
+    agent->state.vel.z += rndf(-0.10f, 0.10f, &env->rng);
+    agent->state.omega = (Vec3){rndf(-0.15f, 0.15f, &env->rng),
+                                rndf(-0.15f, 0.15f, &env->rng),
+                                rndf(-0.20f, 0.20f, &env->rng)};
+    agent->buffer_idx = target_idx;
+}
+
+static inline void race_set_state_before_first(DroneEnv* env, Drone* agent,
+                                               float lateral, float yaw_error,
+                                               float forward_speed) {
+    Target* target = &agent->buffer[0];
+    Vec3 dir = normalize3_or(target->normal, (Vec3){1.0f, 0.0f, 0.0f});
+    Vec3 side = race_course_side(dir);
+    float dist = rndf(2.5f, 4.5f, &env->rng);
+    float side_offset = rndf(-lateral, lateral, &env->rng);
+    float z_offset = rndf(-0.15f, 0.15f, &env->rng);
+    agent->state.pos = clamp_world_vec3(add3(target->pos, add3(
+        scalmul3(dir, -dist),
+        add3(scalmul3(side, side_offset), (Vec3){0.0f, 0.0f, z_offset}))));
+
+    Vec3 to_target = sub3(target->pos, agent->state.pos);
+    float yaw_to_target = atan2f(to_target.y, to_target.x);
+    float roll = rndf(-0.04f, 0.04f, &env->rng);
+    float pitch = rndf(-0.04f, 0.04f, &env->rng);
+    agent->state.quat = race_reset_quat(yaw_to_target - yaw_error, pitch, roll);
+    agent->state.vel = add3(scalmul3(dir, forward_speed),
+                            scalmul3(side, rndf(-0.25f, 0.25f, &env->rng)));
+    agent->state.vel.z += rndf(-0.08f, 0.08f, &env->rng);
+    agent->state.omega = (Vec3){rndf(-0.12f, 0.12f, &env->rng),
+                                rndf(-0.12f, 0.12f, &env->rng),
+                                rndf(-0.16f, 0.16f, &env->rng)};
+    agent->buffer_idx = 0;
+}
+
+static inline void apply_race_reset_curriculum(DroneEnv* env, Drone* agent) {
+    if (env->task != RACE) return;
+    if (!(env->minimal_vision_spawn_visible_target > 0.0f)) return;
+    if (!(env->minimal_vision_enabled > 0.0f)) return;
+    if (env->num_agents != 1) return;
+    if (agent->buffer_size <= 1) return;
+
+    if (env->race_segment_mode >= 1.0f) {
+        float yaw_error_frac = env->race_reset_yaw_error_frac > 0.0f
+            ? env->race_reset_yaw_error_frac
+            : 0.10f;
+        float yaw_error = rndf(-yaw_error_frac * env->minimal_vision_fov,
+                               yaw_error_frac * env->minimal_vision_fov, &env->rng);
+        float t_min = env->race_reset_t_min > 0.0f ? env->race_reset_t_min : 0.02f;
+        float t_max = env->race_reset_t_max > 0.0f ? env->race_reset_t_max : 0.30f;
+        float lateral = env->race_reset_lateral > 0.0f ? env->race_reset_lateral : 0.35f;
+        float speed_min = env->race_reset_speed_min > 0.0f ? env->race_reset_speed_min : 0.3f;
+        float speed_max = env->race_reset_speed_max > 0.0f ? env->race_reset_speed_max : 1.4f;
+        int start_idx = (int)floorf(rndf(0.0f, (float)agent->buffer_size, &env->rng));
+        if (start_idx >= agent->buffer_size) start_idx = agent->buffer_size - 1;
+        race_set_state_segment_start(env, agent, start_idx, t_min, t_max,
+                                     lateral, yaw_error, rndf(speed_min, speed_max, &env->rng));
+        return;
+    }
+
+    float start_prob = env->race_reset_start_prob > 0.0f ? env->race_reset_start_prob : 0.90f;
+    float mix = rndf(0.0f, 1.0f, &env->rng);
+    if (mix < clampf(start_prob, 0.0f, 1.0f)) {
+        if (env->race_track_mode >= 1.0f) {
+            float yaw_error_frac = env->race_reset_yaw_error_frac > 0.0f
+                ? env->race_reset_yaw_error_frac
+                : 0.10f;
+            float yaw_error = rndf(-yaw_error_frac * env->minimal_vision_fov,
+                                   yaw_error_frac * env->minimal_vision_fov, &env->rng);
+            float lateral = env->race_reset_lateral > 0.0f ? env->race_reset_lateral : 0.25f;
+            float speed_min = env->race_reset_speed_min > 0.0f ? env->race_reset_speed_min : 0.3f;
+            float speed_max = env->race_reset_speed_max > 0.0f ? env->race_reset_speed_max : 1.2f;
+            race_set_state_before_first(env, agent, lateral, yaw_error,
+                                        rndf(speed_min, speed_max, &env->rng));
+        }
+        agent->buffer_idx = 0;
+        return;
+    }
+
+    int target_idx = race_random_target_idx(env, agent->buffer_size);
+    float yaw_error_frac = env->race_reset_yaw_error_frac > 0.0f
+        ? env->race_reset_yaw_error_frac
+        : 0.10f;
+    float yaw_error = rndf(-yaw_error_frac * env->minimal_vision_fov,
+                           yaw_error_frac * env->minimal_vision_fov, &env->rng);
+    float t_min = env->race_reset_t_min > 0.0f ? env->race_reset_t_min : 0.15f;
+    float t_max = env->race_reset_t_max > 0.0f ? env->race_reset_t_max : 0.45f;
+    float lateral = env->race_reset_lateral > 0.0f ? env->race_reset_lateral : 0.25f;
+    float speed_min = env->race_reset_speed_min > 0.0f ? env->race_reset_speed_min : 0.3f;
+    float speed_max = env->race_reset_speed_max > 0.0f ? env->race_reset_speed_max : 1.2f;
+    race_set_state_between(env, agent, target_idx, t_min, t_max,
+                           lateral, yaw_error, rndf(speed_min, speed_max, &env->rng));
+}
+
 static inline DomainRandomization env_domain_randomization(DroneEnv* env) {
     return (DomainRandomization){
         .enabled = env->domain_randomization,
@@ -375,7 +1063,9 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->episode_return = 0.0f;
     agent->episode_length = 0;
     agent->collisions = 0.0f;
+    agent->ring_collision = 0.0f;
     agent->rings_passed = 0;
+    agent->race_gate_bank = 0.0f;
     agent->score = 0.0f;
     agent->hover_score = 0.0f;
     agent->hover_ema = 0.0f;
@@ -399,6 +1089,27 @@ void reset_agent(DroneEnv* env, Drone* agent, int idx) {
     agent->motor_clip_high_count = 0.0f;
     for (int i = 0; i < 4; i++) agent->rpm_sum[i] = 0.0f;
     agent->instrumentation_steps = 0.0f;
+    agent->target_in_fov_sum = 0.0f;
+    agent->retina_rgb_mean_sum = 0.0f;
+    agent->retina_rgb_std_sum = 0.0f;
+    agent->retina_energy_sum = 0.0f;
+    agent->retina_argmax_sum = 0.0f;
+    agent->retina_argmax_left_count = 0.0f;
+    agent->retina_argmax_center_count = 0.0f;
+    agent->retina_argmax_right_count = 0.0f;
+    agent->bearing_error_sum = 0.0f;
+    agent->distance_to_target_sum = 0.0f;
+    agent->retina_signal_vs_distance_sum = 0.0f;
+    for (int gate = 0; gate < DRONE_GATE_DEBUG_MAX; gate++) {
+        agent->gate_time[gate] = 0.0f;
+        agent->gate_target_in_fov[gate] = 0.0f;
+        agent->gate_bearing_error[gate] = 0.0f;
+        agent->gate_distance_to_target[gate] = 0.0f;
+        agent->gate_pass_count[gate] = 0.0f;
+        agent->gate_collision_count[gate] = 0.0f;
+        agent->gate_timeout_count[gate] = 0.0f;
+        agent->gate_oob_count[gate] = 0.0f;
+    }
     agent->r_dist_sum = 0.0f;
     agent->r_hover_sum = 0.0f;
     agent->r_shaping_sum = 0.0f;
@@ -469,7 +1180,10 @@ void c_reset(DroneEnv* env) {
     for (int i = 0; i < env->num_agents; i++) {
         Drone* agent = &env->agents[i];
         reset_agent(env, agent, i);
+        set_visible_race_course(env, agent);
+        apply_race_reset_curriculum(env, agent);
         set_target(&env->rng, env->task, env->agents, i, env->num_agents, env->hover_target_dist);
+        set_minimal_vision_visible_target(env, agent);
         finalize_reset_potential(env, agent);
     }
 
@@ -508,10 +1222,33 @@ void c_step(DroneEnv* env) {
         bool oob = norm3(sub3(agent->target->pos, agent->state.pos)) > env->oob_radius;
         bool timeout = (agent->episode_length >= HORIZON);
 
+        int ring_result = 0;
+        bool lap_complete = false;
+        if (env->task == RACE) {
+            int current_gate_idx = race_clamped_gate_idx(agent);
+            ring_result = check_ring(agent, agent->target);
+            if (ring_result == 1) {
+                agent->rings_passed += 1;
+                agent->race_gate_bank += 1.0f;
+                if (current_gate_idx >= 0 && current_gate_idx < DRONE_GATE_DEBUG_MAX) {
+                    agent->gate_pass_count[current_gate_idx] += 1.0f;
+                }
+                lap_complete = env->race_segment_mode >= 1.0f
+                    || (agent->buffer_size > 0 && agent->buffer_idx == agent->buffer_size - 1);
+            } else if (ring_result == -1) {
+                agent->ring_collision += 1.0f;
+                agent->collisions += 1.0f;
+                if (current_gate_idx >= 0 && current_gate_idx < DRONE_GATE_DEBUG_MAX) {
+                    agent->gate_collision_count[current_gate_idx] += 1.0f;
+                }
+            }
+        }
+
         float curr = hover_potential(agent, env->hover_dist, env->hover_omega, env->hover_vel);
         float prev_dist = norm3(sub3(agent->target->pos, agent->prev_pos));
         float curr_dist = norm3(sub3(agent->target->pos, agent->state.pos));
         float omega = norm3(agent->state.omega);
+        float speed = norm3(agent->state.vel);
         float omega_xy = sqrtf(agent->state.omega.x * agent->state.omega.x
                              + agent->state.omega.y * agent->state.omega.y);
         float omega_z = agent->state.omega.z;
@@ -526,6 +1263,19 @@ void c_step(DroneEnv* env) {
         float r_shaping = env->alpha_shaping * (curr - agent->prev_potential);
         float r_omega = r_omega_xy + r_omega_z;
         float r_terminal = 0.0f;
+        if (env->task == RACE) {
+            if (ring_result == 1) r_terminal += 0.2f;
+            else if (ring_result == -1) r_terminal -= 2.0f;
+            if (oob) {
+                r_terminal += -10.0f
+                            - agent->race_gate_bank
+                            - 0.05f * speed * speed;
+                agent->race_gate_bank = 0.0f;
+            } else if (lap_complete || timeout) {
+                r_terminal += agent->race_gate_bank;
+                agent->race_gate_bank = 0.0f;
+            }
+        }
         float r_action_delta = -env->alpha_action_delta * action_delta_mean
                              -env->alpha_reset_action_delta * reset_action_jump;
         float reward = r_dist + r_hover + r_shaping + r_omega + r_terminal + r_action_delta;
@@ -536,24 +1286,34 @@ void c_step(DroneEnv* env) {
         agent->hover_score += h;
         agent->hover_ema = (1.0f - 0.02f) * agent->hover_ema + 0.02f * h;
         agent->ema_dist = 0.99f * agent->ema_dist + 0.01f * curr_dist;
-        agent->ema_vel = 0.99f * agent->ema_vel + 0.01f * norm3(agent->state.vel);
+        agent->ema_vel = 0.99f * agent->ema_vel + 0.01f * speed;
         agent->ema_omega = 0.99f * agent->ema_omega + 0.01f * omega;
         agent->ema_omega_x = 0.99f * agent->ema_omega_x + 0.01f * fabsf(agent->state.omega.x);
         agent->ema_omega_y = 0.99f * agent->ema_omega_y + 0.01f * fabsf(agent->state.omega.y);
         agent->ema_omega_z = 0.99f * agent->ema_omega_z + 0.01f * fabsf(agent->state.omega.z);
+        record_retina_diagnostics(env, agent);
         record_step_metrics(agent, raw_actions, r_dist, r_hover, r_shaping, r_omega,
                             r_omega_xy, r_omega_z, r_terminal,
                             action_delta_mean, reset_action_jump);
         agent->episode_return += reward;
         env->rewards[i] = reward;
 
-        bool reset = oob || timeout;
+        if (env->task == RACE && ring_result == 1 && !lap_complete) {
+            agent->buffer_idx = agent->buffer_idx + 1;
+            set_target(&env->rng, env->task, env->agents, i, env->num_agents, env->hover_target_dist);
+            finalize_reset_potential(env, agent);
+        }
+
+        bool reset = oob || timeout || lap_complete;
         env->terminals[i] = reset ? 1.0f : 0.0f;
 
         if (reset) {
-            add_log(env, i, oob, timeout);
+            add_log(env, i, oob, timeout, lap_complete);
             reset_agent(env, agent, i);
+            set_visible_race_course(env, agent);
+            apply_race_reset_curriculum(env, agent);
             set_target(&env->rng, env->task, env->agents, i, env->num_agents, env->hover_target_dist);
+            set_minimal_vision_visible_target(env, agent);
             finalize_reset_potential(env, agent);
         }
     }
