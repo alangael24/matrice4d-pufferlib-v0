@@ -401,6 +401,7 @@ struct DroneCudaCtx {
     float minimal_vision_noise;
     float minimal_vision_distractors;
     float minimal_vision_spawn_visible_target;
+    float minimal_vision_gate_mask;
     float race_track_mode;
     float race_segment_mode;
     float race_isb_enabled;
@@ -2298,6 +2299,30 @@ __device__ float minimal_vision_blob_intensity_dev(float4 q_inv, float3 pos, flo
     return front * depth * h * v;
 }
 
+__device__ float minimal_vision_gate_mask_intensity_dev(float4 q_inv, float3 pos,
+                                                        float3 gate_pos, float gate_radius,
+                                                        float center_x, float center_y,
+                                                        float fov, float vfov,
+                                                        float depth_gain) {
+    float3 rel = quat_rotate_dev(q_inv, sub3_dev(gate_pos, pos));
+    if (rel.x <= 0.0f) return 0.0f;
+
+    float yaw = atan2f(rel.y, fmaxf(rel.x, 1e-5f));
+    float xy = sqrtf(rel.x * rel.x + rel.y * rel.y);
+    float pitch = atan2f(rel.z, fmaxf(xy, 1e-5f));
+    float dist = fmaxf(norm3_dev(rel), 1e-3f);
+    float radius = atan2f(fmaxf(gate_radius, 0.05f), dist);
+    float dx = center_x - yaw;
+    float dy = center_y - pitch;
+    float rho = sqrtf(dx * dx + dy * dy);
+    float pixel = fminf(fov / (float)DRONE_MINIMAL_VISION_WIDTH,
+                        vfov / (float)DRONE_MINIMAL_VISION_HEIGHT);
+    float edge_sigma = fmaxf(0.35f * pixel, 0.18f * radius);
+    float e = (rho - radius) / fmaxf(edge_sigma, 1e-4f);
+    float depth = 1.0f / (1.0f + depth_gain * dist);
+    return expf(-0.5f * e * e) * depth;
+}
+
 __device__ void minimal_vision_pixel_rgb_dev(const DroneCudaState* s, const DroneCudaCtx& cfg,
                                              int px, int py,
                                              float* red, float* green, float* blue) {
@@ -2313,6 +2338,37 @@ __device__ void minimal_vision_pixel_rgb_dev(const DroneCudaState* s, const Dron
         ? 0.0f
         : 0.5f * vfov - ((float)py + 0.5f) * (vfov / (float)DRONE_MINIMAL_VISION_HEIGHT);
     float center_x = -0.5f * fov + ((float)px + 0.5f) * (fov / (float)DRONE_MINIMAL_VISION_WIDTH);
+
+    if (cfg.minimal_vision_gate_mask > 0.0f) {
+        if (cfg.task == DRONE_TASK_RACE && s->buffer_size > 0) {
+            int idx0 = s->buffer_idx;
+            if (idx0 < 0) idx0 = 0;
+            if (idx0 >= s->buffer_size) idx0 = s->buffer_size - 1;
+            int idx1 = s->buffer_size > 1 ? (idx0 + 1) % s->buffer_size : idx0;
+            int idx2 = s->buffer_size > 2 ? (idx0 + 2) % s->buffer_size : idx1;
+            *red = minimal_vision_gate_mask_intensity_dev(
+                q_inv, s->pos, s->ring_pos[idx0], s->ring_radius[idx0],
+                center_x, center_y, fov, vfov, depth_gain);
+            *green = s->buffer_size > 1
+                ? 0.85f * minimal_vision_gate_mask_intensity_dev(
+                    q_inv, s->pos, s->ring_pos[idx1], s->ring_radius[idx1],
+                    center_x, center_y, fov, vfov, depth_gain)
+                : 0.0f;
+            *blue = s->buffer_size > 2
+                ? 0.70f * minimal_vision_gate_mask_intensity_dev(
+                    q_inv, s->pos, s->ring_pos[idx2], s->ring_radius[idx2],
+                    center_x, center_y, fov, vfov, depth_gain)
+                : 0.0f;
+            return;
+        }
+
+        *red = minimal_vision_gate_mask_intensity_dev(
+            q_inv, s->pos, s->target_pos, DRONE_RING_RADIUS,
+            center_x, center_y, fov, vfov, depth_gain);
+        *green = 0.0f;
+        *blue = 0.0f;
+        return;
+    }
 
     if (cfg.task == DRONE_TASK_RACE && s->buffer_size > 0) {
         int idx0 = s->buffer_idx;
@@ -2951,6 +3007,7 @@ static DroneCudaCtx make_host_ctx(StaticVec* vec, Dict* vec_kwargs, Dict* env_kw
     ctx.minimal_vision_noise = dict_float(env_kwargs, "minimal_vision_noise", 0.0f);
     ctx.minimal_vision_distractors = dict_float(env_kwargs, "minimal_vision_distractors", 0.0f);
     ctx.minimal_vision_spawn_visible_target = dict_float(env_kwargs, "minimal_vision_spawn_visible_target", 0.0f);
+    ctx.minimal_vision_gate_mask = dict_float(env_kwargs, "minimal_vision_gate_mask", 0.0f);
     ctx.race_track_mode = dict_float(env_kwargs, "race_track_mode", 0.0f);
     ctx.race_segment_mode = dict_float(env_kwargs, "race_segment_mode", 0.0f);
     ctx.race_isb_enabled = dict_float(env_kwargs, "race_isb_enabled", 0.0f);

@@ -103,6 +103,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->minimal_vision_noise = dict_get_default(kwargs, "minimal_vision_noise", 0.0f);
     env->minimal_vision_distractors = dict_get_default(kwargs, "minimal_vision_distractors", 0.0f);
     env->minimal_vision_spawn_visible_target = dict_get_default(kwargs, "minimal_vision_spawn_visible_target", 0.0f);
+    env->minimal_vision_gate_mask = dict_get_default(kwargs, "minimal_vision_gate_mask", 0.0f);
     env->race_track_mode = dict_get_default(kwargs, "race_track_mode", 0.0f);
     env->race_segment_mode = dict_get_default(kwargs, "race_segment_mode", 0.0f);
     env->race_isb_enabled = dict_get_default(kwargs, "race_isb_enabled", 0.0f);

@@ -51,16 +51,18 @@ static void configure_minimal_vision_baseline(DroneEnv* env) {
     env->action_latency = 0.0f;
     env->sensor_noise = 0.0f;
 
-    env->minimal_vision_enabled = 1.0f;
-    env->minimal_vision_only = 0.0f;
-    env->minimal_vision_mask_target = 1.0f;
-    env->minimal_vision_spawn_visible_target = 1.0f;
+    env->minimal_vision_enabled = getenv_float("M4D_MINIMAL_VISION_ENABLED", 1.0f);
+    env->minimal_vision_only = getenv_float("M4D_MINIMAL_VISION_ONLY", 0.0f);
+    env->minimal_vision_mask_target = getenv_float("M4D_MINIMAL_VISION_MASK_TARGET", 1.0f);
+    env->minimal_vision_spawn_visible_target =
+        getenv_float("M4D_MINIMAL_VISION_SPAWN_VISIBLE_TARGET", 1.0f);
     env->minimal_vision_fov = 2.0943951f;
     env->minimal_vision_vfov = 1.3962634f;
     env->minimal_vision_sigma = getenv_float("M4D_MINIMAL_VISION_SIGMA", race ? 0.22f : 0.45f);
     env->minimal_vision_depth_gain = getenv_float("M4D_MINIMAL_VISION_DEPTH_GAIN", 0.08f);
     env->minimal_vision_noise = getenv_float("M4D_MINIMAL_VISION_NOISE", 0.02f);
     env->minimal_vision_distractors = getenv_float("M4D_MINIMAL_VISION_DISTRACTORS", 0.0f);
+    env->minimal_vision_gate_mask = getenv_float("M4D_MINIMAL_VISION_GATE_MASK", 0.0f);
     env->race_track_mode = getenv_float("RACE_TRACK_MODE", 0.0f);
     env->race_course_yaw_delta = getenv_float("RACE_COURSE_YAW_DELTA", 0.0f);
     env->race_course_pitch_delta = getenv_float("RACE_COURSE_PITCH_DELTA", 0.0f);
@@ -148,6 +150,28 @@ int main(int argc, char** argv) {
             break;
         }
     }
+
+    float n = env->log.n > 1e-6f ? env->log.n : 1.0f;
+    printf(
+        "summary episodes=%.0f rings_passed=%.6f ring_collisions=%.6f collisions=%.6f "
+        "oob=%.6f timeout=%.6f lap_complete=%.6f episode_return=%.6f "
+        "episode_length=%.6f target_in_fov_frac=%.6f retina_energy=%.6f "
+        "bearing_error_to_target=%.6f distance_to_target=%.6f gate_index_at_oob=%.6f\n",
+        env->log.n,
+        env->log.rings_passed / n,
+        env->log.ring_collision / n,
+        env->log.collisions / n,
+        env->log.oob / n,
+        env->log.timeout / n,
+        env->log.lap_complete / n,
+        env->log.episode_return / n,
+        env->log.episode_length / n,
+        env->log.target_in_fov_frac / n,
+        env->log.retina_energy / n,
+        env->log.bearing_error_to_target / n,
+        env->log.distance_to_target / n,
+        env->log.oob_diag_count > 1e-6f ? env->log.gate_index_at_oob / env->log.oob_diag_count : 0.0f);
+    fflush(stdout);
 
     c_close(env);
     m4d_deploy_close(&policy);

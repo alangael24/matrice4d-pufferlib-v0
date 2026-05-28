@@ -796,10 +796,15 @@ PrecisionTensor policy_forward_train(Policy* p, PolicyWeights& w, PolicyActivati
 }
 
 void policy_backward(Policy* p, PolicyWeights& w, PolicyActivations& activations,
-        FloatTensor grad_logits, FloatTensor grad_logstd, FloatTensor grad_value, cudaStream_t stream) {
+        FloatTensor grad_logits, FloatTensor grad_logstd, FloatTensor grad_value,
+        PrecisionTensor extra_grad_hidden, cudaStream_t stream) {
     int B = grad_logits.shape[0], TT = grad_logits.shape[1];
     PrecisionTensor grad_h = p->decoder.backward(w.decoder, activations.decoder,
         *puf_squeeze(&grad_logits, 0), grad_logstd, *puf_squeeze(&grad_value, 0), stream);
+    if (extra_grad_hidden.data != nullptr) {
+        add_kernel<<<grid_size(numel(grad_h.shape)), BLOCK_SIZE, 0, stream>>>(
+            grad_h.data, extra_grad_hidden.data, numel(grad_h.shape));
+    }
     grad_h = p->network.backward(w.network, *puf_unsqueeze(&grad_h, 0, B, TT), activations.network, stream);
     p->encoder.backward(w.encoder, activations.encoder, grad_h, stream);
 }

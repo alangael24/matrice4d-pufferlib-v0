@@ -62,6 +62,7 @@ MINIMAL_VISION_NOISE="${MINIMAL_VISION_NOISE:-0.02}"
 MINIMAL_VISION_DISTRACTORS="${MINIMAL_VISION_DISTRACTORS:-0.0}"
 MINIMAL_VISION_WIDTH="${MINIMAL_VISION_WIDTH:-3}"
 MINIMAL_VISION_HEIGHT="${MINIMAL_VISION_HEIGHT:-1}"
+MINIMAL_VISION_GATE_MASK="${MINIMAL_VISION_GATE_MASK:-0.0}"
 RACE_TRACK_MODE="${RACE_TRACK_MODE:-0.0}"
 RACE_COURSE_YAW_DELTA="${RACE_COURSE_YAW_DELTA:-0.0}"
 RACE_COURSE_PITCH_DELTA="${RACE_COURSE_PITCH_DELTA:-0.0}"
@@ -88,6 +89,23 @@ RACE_ISB_OMEGA="${RACE_ISB_OMEGA:-0.60}"
 RACE_HARD_GATE_IDX="${RACE_HARD_GATE_IDX:--1.0}"
 RACE_HARD_GATE_PROB="${RACE_HARD_GATE_PROB:-0.0}"
 POLICY_HIDDEN_SIZE="${POLICY_HIDDEN_SIZE:-128}"
+AUX_VIS_COEF="${AUX_VIS_COEF:-0.0}"
+AUX_VIS_FRAC="${AUX_VIS_FRAC:-0.25}"
+if [[ -z "${AUX_VIS_OBS_OFFSET+x}" ]]; then
+  if [[ "$MINIMAL_VISION_ONLY" == "1" || "$MINIMAL_VISION_ONLY" == "1.0" ]]; then
+    AUX_VIS_OBS_OFFSET=0
+  else
+    AUX_VIS_OBS_OFFSET=23
+  fi
+fi
+AUX_VIS_WIDTH="${AUX_VIS_WIDTH:-$MINIMAL_VISION_WIDTH}"
+AUX_VIS_HEIGHT="${AUX_VIS_HEIGHT:-$MINIMAL_VISION_HEIGHT}"
+AUX_VIS_CHANNELS="${AUX_VIS_CHANNELS:-3}"
+PRIVILEGED_CRITIC="${PRIVILEGED_CRITIC:-0.0}"
+PRIVILEGED_CRITIC_OBS_DIM="${PRIVILEGED_CRITIC_OBS_DIM:-23}"
+PRIVILEGED_CRITIC_HIDDEN="${PRIVILEGED_CRITIC_HIDDEN:-$POLICY_HIDDEN_SIZE}"
+ACTOR_OBS_MASK_PREFIX="${ACTOR_OBS_MASK_PREFIX:-0}"
+ACTOR_OBS_MASK_TARGET="${ACTOR_OBS_MASK_TARGET:-0.0}"
 
 mkdir -p "$BATCH_ROOT/checkpoints" "$BATCH_ROOT/logs" artifacts
 git rev-parse HEAD > "$BATCH_ROOT/git_commit.txt" 2>/dev/null || true
@@ -136,6 +154,7 @@ fi
   echo "minimal_vision_distractors=$MINIMAL_VISION_DISTRACTORS"
   echo "minimal_vision_width=$MINIMAL_VISION_WIDTH"
   echo "minimal_vision_height=$MINIMAL_VISION_HEIGHT"
+  echo "minimal_vision_gate_mask=$MINIMAL_VISION_GATE_MASK"
   echo "race_track_mode=$RACE_TRACK_MODE"
   echo "race_segment_mode=$RACE_SEGMENT_MODE"
   echo "race_isb_enabled=$RACE_ISB_ENABLED"
@@ -162,6 +181,17 @@ fi
   echo "race_reset_speed_min=$RACE_RESET_SPEED_MIN"
   echo "race_reset_speed_max=$RACE_RESET_SPEED_MAX"
   echo "policy_hidden_size=$POLICY_HIDDEN_SIZE"
+  echo "aux_vis_coef=$AUX_VIS_COEF"
+  echo "aux_vis_frac=$AUX_VIS_FRAC"
+  echo "aux_vis_obs_offset=$AUX_VIS_OBS_OFFSET"
+  echo "aux_vis_width=$AUX_VIS_WIDTH"
+  echo "aux_vis_height=$AUX_VIS_HEIGHT"
+  echo "aux_vis_channels=$AUX_VIS_CHANNELS"
+  echo "privileged_critic=$PRIVILEGED_CRITIC"
+  echo "privileged_critic_obs_dim=$PRIVILEGED_CRITIC_OBS_DIM"
+  echo "privileged_critic_hidden=$PRIVILEGED_CRITIC_HIDDEN"
+  echo "actor_obs_mask_prefix=$ACTOR_OBS_MASK_PREFIX"
+  echo "actor_obs_mask_target=$ACTOR_OBS_MASK_TARGET"
 } > "$BATCH_ROOT/run_metadata.env"
 
 cmd=(
@@ -181,6 +211,17 @@ cmd=(
   --train.vf-coef 2.0
   --train.gamma 0.99
   --train.gae-lambda 0.90
+  --train.aux-vis-coef "$AUX_VIS_COEF"
+  --train.aux-vis-frac "$AUX_VIS_FRAC"
+  --train.aux-vis-obs-offset "$AUX_VIS_OBS_OFFSET"
+  --train.aux-vis-width "$AUX_VIS_WIDTH"
+  --train.aux-vis-height "$AUX_VIS_HEIGHT"
+  --train.aux-vis-channels "$AUX_VIS_CHANNELS"
+  --train.privileged-critic "$PRIVILEGED_CRITIC"
+  --train.privileged-critic-obs-dim "$PRIVILEGED_CRITIC_OBS_DIM"
+  --train.privileged-critic-hidden "$PRIVILEGED_CRITIC_HIDDEN"
+  --train.actor-obs-mask-prefix "$ACTOR_OBS_MASK_PREFIX"
+  --train.actor-obs-mask-target "$ACTOR_OBS_MASK_TARGET"
   --vec.total-agents "$TOTAL_AGENTS"
   --vec.num-buffers "$NUM_BUFFERS"
   --vec.num-threads "$NUM_THREADS"
@@ -215,6 +256,7 @@ cmd=(
   --env.minimal-vision-depth-gain "$MINIMAL_VISION_DEPTH_GAIN"
   --env.minimal-vision-noise "$MINIMAL_VISION_NOISE"
   --env.minimal-vision-distractors "$MINIMAL_VISION_DISTRACTORS"
+  --env.minimal-vision-gate-mask "$MINIMAL_VISION_GATE_MASK"
   --env.race-track-mode "$RACE_TRACK_MODE"
   --env.race-segment-mode "$RACE_SEGMENT_MODE"
   --env.race-isb-enabled "$RACE_ISB_ENABLED"

@@ -121,6 +121,7 @@ struct DroneEnv {
     float minimal_vision_noise;
     float minimal_vision_distractors;
     float minimal_vision_spawn_visible_target;
+    float minimal_vision_gate_mask;
     float race_track_mode;
     float race_segment_mode;
     float race_isb_enabled;
@@ -406,6 +407,29 @@ static inline float minimal_vision_blob_intensity(Quat q_inv, Vec3 pos, Vec3 tar
     return front * depth * h * v;
 }
 
+static inline float minimal_vision_gate_mask_intensity(Quat q_inv, Vec3 pos, Vec3 gate_pos,
+                                                       float gate_radius, float center_x,
+                                                       float center_y, float fov,
+                                                       float vfov, float depth_gain) {
+    Vec3 rel = quat_rotate(q_inv, sub3(gate_pos, pos));
+    if (rel.x <= 0.0f) return 0.0f;
+
+    float yaw = atan2f(rel.y, fmaxf(rel.x, 1e-5f));
+    float xy = sqrtf(rel.x * rel.x + rel.y * rel.y);
+    float pitch = atan2f(rel.z, fmaxf(xy, 1e-5f));
+    float dist = fmaxf(norm3(rel), 1e-3f);
+    float radius = atan2f(fmaxf(gate_radius, 0.05f), dist);
+    float dx = center_x - yaw;
+    float dy = center_y - pitch;
+    float rho = sqrtf(dx * dx + dy * dy);
+    float pixel = fminf(fov / (float)DRONE_MINIMAL_VISION_WIDTH,
+                        vfov / (float)DRONE_MINIMAL_VISION_HEIGHT);
+    float edge_sigma = fmaxf(0.35f * pixel, 0.18f * radius);
+    float e = (rho - radius) / fmaxf(edge_sigma, 1e-4f);
+    float depth = 1.0f / (1.0f + depth_gain * dist);
+    return expf(-0.5f * e * e) * depth;
+}
+
 static inline void minimal_vision_pixel_rgb(DroneEnv* env, Drone* agent, int px, int py,
                                             float* red, float* green, float* blue) {
     Quat q_inv = quat_inverse(agent->state.quat);
@@ -420,6 +444,37 @@ static inline void minimal_vision_pixel_rgb(DroneEnv* env, Drone* agent, int px,
         ? 0.0f
         : 0.5f * vfov - ((float)py + 0.5f) * (vfov / (float)DRONE_MINIMAL_VISION_HEIGHT);
     float center_x = -0.5f * fov + ((float)px + 0.5f) * (fov / (float)DRONE_MINIMAL_VISION_WIDTH);
+
+    if (env->minimal_vision_gate_mask > 0.0f) {
+        if (env->task == RACE && agent->buffer_size > 0) {
+            int idx0 = agent->buffer_idx;
+            if (idx0 < 0) idx0 = 0;
+            if (idx0 >= agent->buffer_size) idx0 = agent->buffer_size - 1;
+            int idx1 = agent->buffer_size > 1 ? (idx0 + 1) % agent->buffer_size : idx0;
+            int idx2 = agent->buffer_size > 2 ? (idx0 + 2) % agent->buffer_size : idx1;
+            *red = minimal_vision_gate_mask_intensity(
+                q_inv, agent->state.pos, agent->buffer[idx0].pos, agent->buffer[idx0].radius,
+                center_x, center_y, fov, vfov, depth_gain);
+            *green = agent->buffer_size > 1
+                ? 0.85f * minimal_vision_gate_mask_intensity(
+                    q_inv, agent->state.pos, agent->buffer[idx1].pos, agent->buffer[idx1].radius,
+                    center_x, center_y, fov, vfov, depth_gain)
+                : 0.0f;
+            *blue = agent->buffer_size > 2
+                ? 0.70f * minimal_vision_gate_mask_intensity(
+                    q_inv, agent->state.pos, agent->buffer[idx2].pos, agent->buffer[idx2].radius,
+                    center_x, center_y, fov, vfov, depth_gain)
+                : 0.0f;
+            return;
+        }
+
+        *red = minimal_vision_gate_mask_intensity(
+            q_inv, agent->state.pos, agent->target->pos, RING_RADIUS,
+            center_x, center_y, fov, vfov, depth_gain);
+        *green = 0.0f;
+        *blue = 0.0f;
+        return;
+    }
 
     if (env->task == RACE && agent->buffer_size > 0) {
         int idx0 = agent->buffer_idx;
