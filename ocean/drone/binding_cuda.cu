@@ -520,6 +520,51 @@ __device__ __forceinline__ float3 race_next_gate_pos_dev(const DroneCudaState* s
     return s->ring_pos[next_idx];
 }
 
+// Navigation tutor for causal diagnosis and distillation.
+// Reuses obs[10..18] when the target-vector fields are masked.
+#define M4D_NAV_TUTOR_ENABLED 0
+#define M4D_NAV_TUTOR_GAIN 1.0f
+#define M4D_NAV_TUTOR_DIST_SCALE 30.0f
+
+__device__ __forceinline__ float4 quat_inverse_dev(float4 q);
+__device__ __forceinline__ float3 quat_rotate_dev(float4 q, float3 v);
+
+__device__ __forceinline__ void race_fill_nav_tutor_obs_dev(const DroneCudaState* s, float* obs) {
+    if (!(M4D_NAV_TUTOR_ENABLED > 0)) return;
+    if (s->buffer_size <= 0) return;
+
+    int idx = race_clamped_gate_idx_dev(s);
+    int next_idx = idx + 1 < s->buffer_size ? idx + 1 : idx;
+    float has_next = next_idx != idx ? 1.0f : 0.0f;
+
+    float3 cur_world = sub3_dev(s->ring_pos[idx], s->pos);
+    float3 next_world = sub3_dev(s->ring_pos[next_idx], s->pos);
+
+    float4 q_inv = quat_inverse_dev(s->quat);
+    float3 cur_body = quat_rotate_dev(q_inv, cur_world);
+    float3 next_body = quat_rotate_dev(q_inv, next_world);
+
+    float cur_d = fmaxf(norm3_dev(cur_world), 1e-6f);
+    float next_d = fmaxf(norm3_dev(next_world), 1e-6f);
+
+    cur_body = scale3_dev(cur_body, 1.0f / cur_d);
+    next_body = scale3_dev(next_body, 1.0f / next_d);
+
+    float g = M4D_NAV_TUTOR_GAIN;
+    float ds = fmaxf(M4D_NAV_TUTOR_DIST_SCALE, 1.0f);
+
+    obs[10] = g * clampf_dev(cur_body.x, -1.0f, 1.0f);
+    obs[11] = g * clampf_dev(cur_body.y, -1.0f, 1.0f);
+    obs[12] = g * clampf_dev(cur_body.z, -1.0f, 1.0f);
+    obs[13] = g * clampf_dev(cur_d / ds, 0.0f, 1.0f);
+
+    obs[14] = g * has_next * clampf_dev(next_body.x, -1.0f, 1.0f);
+    obs[15] = g * has_next * clampf_dev(next_body.y, -1.0f, 1.0f);
+    obs[16] = g * has_next * clampf_dev(next_body.z, -1.0f, 1.0f);
+    obs[17] = g * has_next * clampf_dev(next_d / ds, 0.0f, 1.0f);
+    obs[18] = g * has_next;
+}
+
 __device__ __forceinline__ float3 normalize3_dev(float3 a, float3 fallback) {
     float n = norm3_dev(a);
     if (n <= 1e-6f) return fallback;
@@ -2614,6 +2659,9 @@ __device__ void compute_obs_dev(const DroneCudaState* s, const DroneCudaParams* 
     if (!(cfg.minimal_vision_only > 0.0f) && cfg.minimal_vision_mask_target > 0.0f) {
         #pragma unroll
         for (int i = 10; i < 19; i++) obs[i] = 0.0f;
+    }
+    if (!(cfg.minimal_vision_only > 0.0f) && cfg.task == DRONE_TASK_RACE) {
+        race_fill_nav_tutor_obs_dev(s, obs);
     }
 
     if (cfg.minimal_vision_enabled > 0.0f) {

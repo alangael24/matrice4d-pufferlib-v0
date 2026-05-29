@@ -254,6 +254,60 @@ static inline Vec3 race_next_gate_pos(const Drone* agent) {
     return agent->buffer[next_idx].pos;
 }
 
+// ---------------------------------------------------------------------------
+// Navigation tutor for causal diagnosis and distillation.
+//
+// Important:
+//   This does NOT change observation dimension.
+//   It reuses obs[10..18], which are currently zeroed when
+//   minimal_vision_mask_target > 0.
+//
+// obs[10:13] = body-frame unit vector to current gate
+// obs[13]    = normalized distance to current gate
+// obs[14:17] = body-frame unit vector to next gate
+// obs[17]    = normalized distance to next gate
+// obs[18]    = has_next flag
+// ---------------------------------------------------------------------------
+#define M4D_NAV_TUTOR_ENABLED 0
+#define M4D_NAV_TUTOR_GAIN 1.0f
+#define M4D_NAV_TUTOR_DIST_SCALE 30.0f
+
+static inline void race_fill_nav_tutor_obs(const Drone* agent, float* obs) {
+    if (!(M4D_NAV_TUTOR_ENABLED > 0)) return;
+    if (agent->buffer == NULL || agent->buffer_size <= 0) return;
+
+    int idx = race_clamped_gate_idx(agent);
+    int next_idx = idx + 1 < agent->buffer_size ? idx + 1 : idx;
+    float has_next = next_idx != idx ? 1.0f : 0.0f;
+
+    Vec3 cur_world = sub3(agent->buffer[idx].pos, agent->state.pos);
+    Vec3 next_world = sub3(agent->buffer[next_idx].pos, agent->state.pos);
+
+    Quat q_inv = quat_inverse(agent->state.quat);
+    Vec3 cur_body = quat_rotate(q_inv, cur_world);
+    Vec3 next_body = quat_rotate(q_inv, next_world);
+
+    float cur_d = fmaxf(norm3(cur_world), 1e-6f);
+    float next_d = fmaxf(norm3(next_world), 1e-6f);
+
+    cur_body = scalmul3(cur_body, 1.0f / cur_d);
+    next_body = scalmul3(next_body, 1.0f / next_d);
+
+    float g = M4D_NAV_TUTOR_GAIN;
+    float ds = fmaxf(M4D_NAV_TUTOR_DIST_SCALE, 1.0f);
+
+    obs[10] = g * clampf(cur_body.x, -1.0f, 1.0f);
+    obs[11] = g * clampf(cur_body.y, -1.0f, 1.0f);
+    obs[12] = g * clampf(cur_body.z, -1.0f, 1.0f);
+    obs[13] = g * clampf(cur_d / ds, 0.0f, 1.0f);
+
+    obs[14] = g * has_next * clampf(next_body.x, -1.0f, 1.0f);
+    obs[15] = g * has_next * clampf(next_body.y, -1.0f, 1.0f);
+    obs[16] = g * has_next * clampf(next_body.z, -1.0f, 1.0f);
+    obs[17] = g * has_next * clampf(next_d / ds, 0.0f, 1.0f);
+    obs[18] = g * has_next;
+}
+
 void add_log(DroneEnv* env, int idx, bool oob, bool timeout, bool lap_complete) {
     Drone* agent = &env->agents[idx];
     float steps = fmaxf(agent->instrumentation_steps, 1.0f);
@@ -646,6 +700,9 @@ void compute_observations(DroneEnv* env) {
         }
         if (!(env->minimal_vision_only > 0.0f) && env->minimal_vision_mask_target > 0.0f) {
             for (int j = 10; j < 19; j++) obs[j] = 0.0f;
+        }
+        if (!(env->minimal_vision_only > 0.0f) && env->task == RACE) {
+            race_fill_nav_tutor_obs(&env->agents[i], obs);
         }
 
         if (env->minimal_vision_enabled > 0.0f) {
