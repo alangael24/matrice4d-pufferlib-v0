@@ -984,6 +984,105 @@ static inline float race_pass_margin(Drone* agent, int gate_idx) {
     return gate->radius - dist;
 }
 
+// Math-guided race reward shaping for hard gate-to-gate turns.
+// These compile-time constants are rewritten by the batch script before each
+// rebuild, avoiding extra Python/env binding surface for short experiments.
+#define M4D_RACE_TURN_VSAFE 8.0f
+#define M4D_RACE_TURN_START 9.0f
+#define M4D_RACE_SPEED_K 0.050f
+#define M4D_RACE_CENTER_K 0.020f
+#define M4D_RACE_CENTER_CORRIDOR 1.50f
+#define M4D_RACE_LOOKAHEAD_FRAC 0.45f
+
+static inline float race_smoothstep01(float x) {
+    x = clampf(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+static inline float race_turn_angle_at_gate(const Drone* agent, int idx) {
+    if (agent->buffer == NULL || agent->buffer_size <= 0) return 0.0f;
+    if (idx <= 0 || idx + 1 >= agent->buffer_size) return 0.0f;
+
+    Vec3 prev = agent->buffer[idx - 1].pos;
+    Vec3 cur = agent->buffer[idx].pos;
+    Vec3 next = agent->buffer[idx + 1].pos;
+
+    Vec3 in_dir = normalize3_or(sub3(cur, prev), agent->buffer[idx].normal);
+    Vec3 out_dir = normalize3_or(sub3(next, cur), agent->buffer[idx].normal);
+    float c = clampf(dot3(in_dir, out_dir), -1.0f, 1.0f);
+    return acosf(c);
+}
+
+static inline Vec3 race_reward_lookahead_point(const Drone* agent, Vec3 pos) {
+    if (agent->buffer == NULL || agent->buffer_size <= 0) {
+        return agent->target->pos;
+    }
+
+    int idx = race_clamped_gate_idx(agent);
+    Vec3 cur = agent->buffer[idx].pos;
+
+    if (idx + 1 >= agent->buffer_size) {
+        return cur;
+    }
+
+    float theta = race_turn_angle_at_gate(agent, idx);
+    float turn_w = clampf(theta / 1.5707963f, 0.0f, 1.0f);
+
+    Vec3 next = agent->buffer[idx + 1].pos;
+    Vec3 exit_wp = add3(cur, scalmul3(sub3(next, cur), M4D_RACE_LOOKAHEAD_FRAC));
+
+    float d_cur = norm3(sub3(cur, pos));
+    float near_w = race_smoothstep01((M4D_RACE_TURN_START - d_cur) / M4D_RACE_TURN_START);
+    float w = near_w * turn_w;
+
+    return add3(scalmul3(cur, 1.0f - w), scalmul3(exit_wp, w));
+}
+
+static inline float race_reward_distance_math(const Drone* agent, Vec3 pos) {
+    Vec3 wp = race_reward_lookahead_point(agent, pos);
+    return norm3(sub3(wp, pos));
+}
+
+static inline float race_turn_speed_penalty_math(const Drone* agent, float speed) {
+    if (agent->buffer == NULL || agent->buffer_size <= 0) return 0.0f;
+
+    int idx = race_clamped_gate_idx(agent);
+    float theta = race_turn_angle_at_gate(agent, idx);
+    float turn_w = clampf(theta / 1.5707963f, 0.0f, 1.0f);
+
+    Vec3 cur = agent->buffer[idx].pos;
+    float d_cur = norm3(sub3(cur, agent->state.pos));
+    float near_w = race_smoothstep01((M4D_RACE_TURN_START - d_cur) / M4D_RACE_TURN_START);
+
+    float excess = fmaxf(0.0f, speed - M4D_RACE_TURN_VSAFE);
+    float turn_penalty = -M4D_RACE_SPEED_K * turn_w * near_w * excess * excess;
+
+    float center_d = race_track_centerline_distance(agent);
+    float off_w = race_smoothstep01((center_d - M4D_RACE_CENTER_CORRIDOR) / 4.0f);
+    float off_penalty = -0.50f * M4D_RACE_SPEED_K * off_w * excess * excess;
+
+    return turn_penalty + off_penalty;
+}
+
+static inline float race_centerline_penalty_math(const Drone* agent) {
+    float d = race_track_centerline_distance(agent);
+    float excess = fmaxf(0.0f, d - M4D_RACE_CENTER_CORRIDOR);
+    return -M4D_RACE_CENTER_K * excess * excess;
+}
+
+static inline float race_exit_velocity_alignment_math(const Drone* agent, int gate_idx) {
+    if (agent->buffer == NULL || gate_idx < 0 || gate_idx + 1 >= agent->buffer_size) {
+        return 0.0f;
+    }
+
+    Vec3 cur = agent->buffer[gate_idx].pos;
+    Vec3 next = agent->buffer[gate_idx + 1].pos;
+    Vec3 out_dir = normalize3_or(sub3(next, cur), agent->buffer[gate_idx].normal);
+    Vec3 vel_dir = normalize3_or(agent->state.vel, out_dir);
+
+    return clampf(dot3(vel_dir, out_dir), -1.0f, 1.0f);
+}
+
 static inline void race_isb_perturb_state(DroneEnv* env, Drone* agent) {
     float pos_xy = env->race_isb_pos_xy > 0.0f ? env->race_isb_pos_xy : 0.45f;
     float pos_z = env->race_isb_z > 0.0f ? env->race_isb_z : 0.25f;
@@ -1397,8 +1496,12 @@ void c_step(DroneEnv* env) {
         }
 
         float curr = hover_potential(agent, env->hover_dist, env->hover_omega, env->hover_vel);
-        float prev_dist = norm3(sub3(agent->target->pos, agent->prev_pos));
-        float curr_dist = norm3(sub3(agent->target->pos, agent->state.pos));
+        float prev_dist = env->task == RACE
+            ? race_reward_distance_math(agent, agent->prev_pos)
+            : norm3(sub3(agent->target->pos, agent->prev_pos));
+        float curr_dist = env->task == RACE
+            ? race_reward_distance_math(agent, agent->state.pos)
+            : norm3(sub3(agent->target->pos, agent->state.pos));
         float omega = norm3(agent->state.omega);
         float speed = norm3(agent->state.vel);
         float omega_xy = sqrtf(agent->state.omega.x * agent->state.omega.x
@@ -1411,12 +1514,26 @@ void c_step(DroneEnv* env) {
 
         // Branch goal: penalize yaw spin without destroying translational navigation.
         float r_dist = env->alpha_dist * (prev_dist - curr_dist);
-        float r_hover = env->alpha_hover * curr;
-        float r_shaping = env->alpha_shaping * (curr - agent->prev_potential);
+        float r_centerline = env->task == RACE ? race_centerline_penalty_math(agent) : 0.0f;
+        float r_turn_speed = env->task == RACE ? race_turn_speed_penalty_math(agent, speed) : 0.0f;
+        float r_hover = env->task == RACE ? 0.0f : env->alpha_hover * curr;
+        float r_shaping = env->task == RACE ? 0.0f : env->alpha_shaping * (curr - agent->prev_potential);
         float r_omega = r_omega_xy + r_omega_z;
         float r_terminal = 0.0f;
         if (env->task == RACE) {
-            if (ring_result == 1) r_terminal += 0.2f;
+            if (ring_result == 1) {
+                r_terminal += 0.2f;
+
+                int passed_gate_idx = race_clamped_gate_idx(agent);
+                if (passed_gate_idx + 1 < agent->buffer_size) {
+                    float align = race_exit_velocity_alignment_math(agent, passed_gate_idx);
+                    float margin = race_pass_margin(agent, passed_gate_idx);
+                    float radius = fmaxf(agent->buffer[passed_gate_idx].radius, 1e-3f);
+                    float margin_norm = clampf(margin / radius, -1.0f, 1.0f);
+
+                    r_terminal += 2.0f * align + 0.50f * margin_norm;
+                }
+            }
             else if (ring_result == -1) r_terminal -= 2.0f;
             if (oob) {
                 r_terminal += -10.0f
@@ -1430,7 +1547,14 @@ void c_step(DroneEnv* env) {
         }
         float r_action_delta = -env->alpha_action_delta * action_delta_mean
                              -env->alpha_reset_action_delta * reset_action_jump;
-        float reward = r_dist + r_hover + r_shaping + r_omega + r_terminal + r_action_delta;
+        float reward = r_dist
+                     + r_centerline
+                     + r_turn_speed
+                     + r_hover
+                     + r_shaping
+                     + r_omega
+                     + r_terminal
+                     + r_action_delta;
         
         agent->prev_potential = curr;
 

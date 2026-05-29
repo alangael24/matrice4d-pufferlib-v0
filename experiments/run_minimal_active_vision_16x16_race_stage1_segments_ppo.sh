@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stage 1: single-segment racing.
-#
-# Each episode samples one segment Gi -> G(i+1), including G7 -> G1 on the
-# seven-gate Swift-like track. The drone resets near the start of that segment
-# and the episode terminates successfully as soon as it passes the next gate.
+# Stage 1: single-segment racing. Each episode samples one Swift-like segment
+# and terminates successfully as soon as the next gate is passed.
+
+source "$(dirname "$0")/minimal_active_vision_common.sh"
 
 if [[ -z "${BASE:-}" ]]; then
   for candidate_root in \
@@ -24,54 +23,13 @@ export BATCH_ID="${BATCH_ID:-v0_minimal_active_vision_16x16_race_stage1_segments
 export TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-500000000}"
 export CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-20}"
 
-export TASK=7
 export MAX_RINGS="${MAX_RINGS:-7}"
-export TARGET_DIST="${TARGET_DIST:-5.0}"
 export OOB_RADIUS="${OOB_RADIUS:-14.0}"
 export RESET_POS_SCALE="${RESET_POS_SCALE:-0.02}"
 export RESET_YAW_RANGE="${RESET_YAW_RANGE:-0.20}"
-export RESET_VEL_MAX="${RESET_VEL_MAX:-0.0}"
+mav_race16_base
+mav_race16_segment_reset_defaults
+mav_race16_reward_defaults 0.55 0.0045 0.0045 0.007 0.012
+mav_default LEARNING_RATE 0.0008
 
-export MINIMAL_VISION_ENABLED=1.0
-export MINIMAL_VISION_ONLY="${MINIMAL_VISION_ONLY:-0.0}"
-export MINIMAL_VISION_MASK_TARGET=1.0
-export MINIMAL_VISION_SPAWN_VISIBLE_TARGET=1.0
-export MINIMAL_VISION_WIDTH=16
-export MINIMAL_VISION_HEIGHT=16
-export MINIMAL_VISION_FOV="${MINIMAL_VISION_FOV:-2.0943951}"
-export MINIMAL_VISION_VFOV="${MINIMAL_VISION_VFOV:-1.3962634}"
-export MINIMAL_VISION_SIGMA="${MINIMAL_VISION_SIGMA:-0.22}"
-export MINIMAL_VISION_DEPTH_GAIN="${MINIMAL_VISION_DEPTH_GAIN:-0.08}"
-export MINIMAL_VISION_NOISE="${MINIMAL_VISION_NOISE:-0.02}"
-export MINIMAL_VISION_DISTRACTORS="${MINIMAL_VISION_DISTRACTORS:-0.0}"
-
-export RACE_TRACK_MODE="${RACE_TRACK_MODE:-1.0}"
-export RACE_SEGMENT_MODE=1.0
-export RACE_RESET_T_MIN="${RACE_RESET_T_MIN:-0.02}"
-export RACE_RESET_T_MAX="${RACE_RESET_T_MAX:-0.30}"
-export RACE_RESET_LATERAL="${RACE_RESET_LATERAL:-0.45}"
-export RACE_RESET_YAW_ERROR_FRAC="${RACE_RESET_YAW_ERROR_FRAC:-0.12}"
-export RACE_RESET_SPEED_MIN="${RACE_RESET_SPEED_MIN:-0.4}"
-export RACE_RESET_SPEED_MAX="${RACE_RESET_SPEED_MAX:-2.0}"
-
-export ALPHA_DIST="${ALPHA_DIST:-0.55}"
-export ALPHA_HOVER="${ALPHA_HOVER:-0.0}"
-export ALPHA_SHAPING="${ALPHA_SHAPING:-0.0}"
-export ALPHA_OMEGA_XY="${ALPHA_OMEGA_XY:-0.0045}"
-export ALPHA_OMEGA_Z="${ALPHA_OMEGA_Z:-0.0045}"
-export ALPHA_OMEGA_Z_SQ="${ALPHA_OMEGA_Z_SQ:-0.007}"
-export ALPHA_OMEGA_Z_MULT="${ALPHA_OMEGA_Z_MULT:-1.5}"
-export ALPHA_ACTION_DELTA="${ALPHA_ACTION_DELTA:-0.012}"
-export ALPHA_RESET_ACTION_DELTA="${ALPHA_RESET_ACTION_DELTA:-0.0}"
-
-export ACTION_MODE="${ACTION_MODE:-1}"
-export ACTION_SCALE="${ACTION_SCALE:-1.0}"
-export NORMALIZED_THRUST_MAX="${NORMALIZED_THRUST_MAX:-0.80}"
-export LEARNING_RATE="${LEARNING_RATE:-0.0008}"
-export MINIBATCH_SIZE="${MINIBATCH_SIZE:-16384}"
-export HORIZON="${HORIZON:-64}"
-export POLICY_HIDDEN_SIZE="${POLICY_HIDDEN_SIZE:-128}"
-export TOTAL_AGENTS="${TOTAL_AGENTS:-8192}"
-export NUM_DRONES="${NUM_DRONES:-8192}"
-
-exec bash experiments/run_minimal_active_vision_ppo.sh
+mav_exec_base

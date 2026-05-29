@@ -22,7 +22,7 @@ static double wall_clock() {
 enum LossIdx {
     LOSS_PG = 0, LOSS_VF = 1, LOSS_ENT = 2, LOSS_TOTAL = 3,
     LOSS_OLD_APPROX_KL = 4, LOSS_APPROX_KL = 5, LOSS_CLIPFRAC = 6,
-    LOSS_AUX_VIS = 7, LOSS_N = 8, NUM_LOSSES = 9,
+    LOSS_N = 7, NUM_LOSSES = 8,
 };
 
 enum ProfileIdx {
@@ -188,264 +188,6 @@ void register_ppo_buffers(PPOBuffersPuf& bufs, Allocator* alloc, int N, int T, i
     alloc_register(alloc, &bufs.adv_scratch);
 }
 
-#define AUX_VIS_MOMENTS_PER_CHANNEL 5
-
-struct AuxVisWeights {
-    PrecisionTensor weight;
-    int input_dim;
-    int output_dim;
-};
-
-struct AuxVisActivations {
-    PrecisionTensor input;
-    PrecisionTensor pred;
-    PrecisionTensor grad_pred;
-    PrecisionTensor grad_input;
-    PrecisionTensor grad_hidden;
-    PrecisionTensor wgrad_scratch;
-};
-
-void aux_vis_reg_params(AuxVisWeights& w, Allocator* alloc, int input_dim, int output_dim) {
-    w.input_dim = input_dim;
-    w.output_dim = output_dim;
-    if (input_dim <= 0 || output_dim <= 0) return;
-    w.weight = {.shape = {output_dim, input_dim}};
-    alloc_register(alloc, &w.weight);
-}
-
-void aux_vis_reg_train(AuxVisWeights& w, AuxVisActivations& a, Allocator* acts,
-        Allocator* grads, int B_TT, int hidden_dim) {
-    if (w.input_dim <= 0 || w.output_dim <= 0) return;
-    a = (AuxVisActivations){
-        .input =         {.shape = {B_TT, w.input_dim}},
-        .pred =          {.shape = {B_TT, w.output_dim}},
-        .grad_pred =     {.shape = {B_TT, w.output_dim}},
-        .grad_input =    {.shape = {B_TT, w.input_dim}},
-        .grad_hidden =   {.shape = {B_TT, hidden_dim}},
-        .wgrad_scratch = {.shape = {w.output_dim, w.input_dim}},
-    };
-    alloc_register(acts, &a.input);
-    alloc_register(acts, &a.pred);
-    alloc_register(acts, &a.grad_pred);
-    alloc_register(acts, &a.grad_input);
-    alloc_register(acts, &a.grad_hidden);
-    alloc_register(grads, &a.wgrad_scratch);
-}
-
-void aux_vis_init_weights(AuxVisWeights& w, ulong* seed, cudaStream_t stream) {
-    if (w.input_dim <= 0 || w.output_dim <= 0) return;
-    puf_kaiming_init(&w.weight, 1.0f, (*seed)++, stream);
-}
-
-__global__ void aux_vis_assemble_input(
-        precision_t* __restrict__ dst,
-        const precision_t* __restrict__ hidden,
-        const precision_t* __restrict__ actions,
-        int B_TT, int hidden_dim, int num_atns, int aux_input_dim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B_TT * aux_input_dim;
-    if (idx >= total) return;
-    int row = idx / aux_input_dim;
-    int col = idx % aux_input_dim;
-    if (col < hidden_dim) {
-        dst[idx] = hidden[row * hidden_dim + col];
-    } else {
-        int a = col - hidden_dim;
-        dst[idx] = actions[row * num_atns + a];
-    }
-}
-
-__global__ void aux_vis_extract_hidden_grad(
-        precision_t* __restrict__ grad_hidden,
-        const precision_t* __restrict__ grad_input,
-        int B_TT, int hidden_dim, int aux_input_dim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B_TT * hidden_dim;
-    if (idx >= total) return;
-    int row = idx / hidden_dim;
-    int col = idx % hidden_dim;
-    grad_hidden[idx] = grad_input[row * aux_input_dim + col];
-}
-
-__device__ __forceinline__ float aux_vis_huber(float diff, float* grad) {
-    float ad = fabsf(diff);
-    if (ad <= 1.0f) {
-        *grad = diff;
-        return 0.5f * diff * diff;
-    }
-    *grad = copysignf(1.0f, diff);
-    return ad - 0.5f;
-}
-
-__global__ void aux_vis_moments_loss(
-        const precision_t* __restrict__ pred,
-        precision_t* __restrict__ grad_pred,
-        const precision_t* __restrict__ obs,
-        const precision_t* __restrict__ terminals,
-        float* __restrict__ losses_acc,
-        int B, int T, int obs_size, int obs_offset,
-        int width, int height, int channels,
-        float coef, float frac) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * T * channels;
-    if (idx >= total) return;
-
-    int c = idx % channels;
-    int nt = idx / channels;
-    int t = nt % T;
-    int n = nt / T;
-    int out_dim = channels * AUX_VIS_MOMENTS_PER_CHANNEL;
-
-    if (coef <= 0.0f || frac <= 0.0f || t >= T - 1) return;
-    if (obs_offset < 0 || width <= 0 || height <= 0 || channels <= 0) return;
-    if (obs_offset + width * height * channels > obs_size) return;
-    if (to_float(terminals[nt]) > 0.5f) return;
-
-    if (frac < 0.999f) {
-        unsigned int h = (unsigned int)(nt * 1103515245u + 12345u);
-        float u = (float)(h & 0xffffu) * (1.0f / 65535.0f);
-        if (u > frac) return;
-    }
-
-    int next_row = n * T + (t + 1);
-    int base = next_row * obs_size + obs_offset;
-    float mass_sum = 0.0f;
-    float wx_sum = 0.0f;
-    float wy_sum = 0.0f;
-    float peak = 0.0f;
-
-    for (int py = 0; py < height; py++) {
-        float y = height > 1 ? (2.0f * (float)py / (float)(height - 1) - 1.0f) : 0.0f;
-        for (int px = 0; px < width; px++) {
-            float x = width > 1 ? (2.0f * (float)px / (float)(width - 1) - 1.0f) : 0.0f;
-            int pidx = base + (py * width + px) * channels + c;
-            float v = fmaxf(0.0f, to_float(obs[pidx]));
-            mass_sum += v;
-            wx_sum += v * x;
-            wy_sum += v * y;
-            peak = fmaxf(peak, v);
-        }
-    }
-
-    float inv_mass = 1.0f / fmaxf(mass_sum, 1e-6f);
-    float cx = mass_sum > 1e-6f ? wx_sum * inv_mass : 0.0f;
-    float cy = mass_sum > 1e-6f ? wy_sum * inv_mass : 0.0f;
-    float spread_sum = 0.0f;
-    if (mass_sum > 1e-6f) {
-        for (int py = 0; py < height; py++) {
-            float y = height > 1 ? (2.0f * (float)py / (float)(height - 1) - 1.0f) : 0.0f;
-            for (int px = 0; px < width; px++) {
-                float x = width > 1 ? (2.0f * (float)px / (float)(width - 1) - 1.0f) : 0.0f;
-                int pidx = base + (py * width + px) * channels + c;
-                float v = fmaxf(0.0f, to_float(obs[pidx]));
-                float dx = x - cx;
-                float dy = y - cy;
-                spread_sum += v * (dx * dx + dy * dy);
-            }
-        }
-    }
-    float denom_pixels = fmaxf(1.0f, (float)(width * height));
-    float target[AUX_VIS_MOMENTS_PER_CHANNEL] = {
-        mass_sum / denom_pixels,
-        cx,
-        cy,
-        mass_sum > 1e-6f ? spread_sum * inv_mass : 0.0f,
-        peak,
-    };
-
-    float norm = coef / fmaxf(1.0f, (float)(B * (T - 1) * out_dim) * fmaxf(frac, 1e-3f));
-    int pred_base = nt * out_dim + c * AUX_VIS_MOMENTS_PER_CHANNEL;
-    float local_loss = 0.0f;
-    for (int m = 0; m < AUX_VIS_MOMENTS_PER_CHANNEL; m++) {
-        float diff = to_float(pred[pred_base + m]) - target[m];
-        float g = 0.0f;
-        float l = aux_vis_huber(diff, &g);
-        grad_pred[pred_base + m] = from_float(norm * g);
-        local_loss += norm * l;
-    }
-    atomicAdd(&losses_acc[LOSS_AUX_VIS], local_loss);
-    atomicAdd(&losses_acc[LOSS_TOTAL], local_loss);
-}
-
-PrecisionTensor aux_vis_forward(AuxVisWeights& w, AuxVisActivations& a,
-        PrecisionTensor hidden, PrecisionTensor actions, int num_atns, cudaStream_t stream) {
-    int B_TT = hidden.shape[0];
-    int hidden_dim = hidden.shape[1];
-    int total = B_TT * w.input_dim;
-    aux_vis_assemble_input<<<grid_size(total), BLOCK_SIZE, 0, stream>>>(
-        a.input.data, hidden.data, actions.data,
-        B_TT, hidden_dim, num_atns, w.input_dim);
-    puf_mm(&a.input, &w.weight, &a.pred, stream);
-    return a.pred;
-}
-
-PrecisionTensor aux_vis_backward(AuxVisWeights& w, AuxVisActivations& a,
-        int hidden_dim, cudaStream_t stream) {
-    puf_mm_tn(&a.grad_pred, &a.input, &a.wgrad_scratch, stream);
-    puf_mm_nn(&a.grad_pred, &w.weight, &a.grad_input, stream);
-    int B_TT = a.grad_hidden.shape[0];
-    aux_vis_extract_hidden_grad<<<grid_size(B_TT * hidden_dim), BLOCK_SIZE, 0, stream>>>(
-        a.grad_hidden.data, a.grad_input.data, B_TT, hidden_dim, w.input_dim);
-    return a.grad_hidden;
-}
-
-struct PrivCriticWeights {
-    PrecisionTensor w1;
-    PrecisionTensor w2;
-    int input_dim;
-    int hidden_dim;
-};
-
-struct PrivCriticActivations {
-    PrecisionTensor input;
-    PrecisionTensor hidden;
-    PrecisionTensor value;
-    PrecisionTensor grad_value;
-    PrecisionTensor grad_hidden;
-    PrecisionTensor wgrad1_scratch;
-    PrecisionTensor wgrad2_scratch;
-};
-
-void priv_critic_reg_params(PrivCriticWeights& w, Allocator* alloc,
-        int input_dim, int hidden_dim) {
-    w.input_dim = input_dim;
-    w.hidden_dim = hidden_dim;
-    if (input_dim <= 0 || hidden_dim <= 0) return;
-    w.w1 = {.shape = {hidden_dim, input_dim}};
-    w.w2 = {.shape = {1, hidden_dim}};
-    alloc_register(alloc, &w.w1);
-    alloc_register(alloc, &w.w2);
-}
-
-void priv_critic_reg_activations(PrivCriticWeights& w, PrivCriticActivations& a,
-        Allocator* acts, Allocator* grads, int rows) {
-    if (w.input_dim <= 0 || w.hidden_dim <= 0 || rows <= 0) return;
-    a = (PrivCriticActivations){
-        .input =          {.shape = {rows, w.input_dim}},
-        .hidden =         {.shape = {rows, w.hidden_dim}},
-        .value =          {.shape = {rows, 1}},
-        .grad_value =     {.shape = {rows, 1}},
-        .grad_hidden =    {.shape = {rows, w.hidden_dim}},
-    };
-    alloc_register(acts, &a.input);
-    alloc_register(acts, &a.hidden);
-    alloc_register(acts, &a.value);
-    alloc_register(acts, &a.grad_value);
-    alloc_register(acts, &a.grad_hidden);
-    if (grads != nullptr) {
-        a.wgrad1_scratch = {.shape = {w.hidden_dim, w.input_dim}};
-        a.wgrad2_scratch = {.shape = {1, w.hidden_dim}};
-        alloc_register(grads, &a.wgrad1_scratch);
-        alloc_register(grads, &a.wgrad2_scratch);
-    }
-}
-
-void priv_critic_init_weights(PrivCriticWeights& w, ulong* seed, cudaStream_t stream) {
-    if (w.input_dim <= 0 || w.hidden_dim <= 0) return;
-    puf_kaiming_init(&w.w1, std::sqrt(2.0f), (*seed)++, stream);
-    puf_kaiming_init(&w.w2, 1.0f, (*seed)++, stream);
-}
-
 __global__ void mask_actor_obs_kernel(
         precision_t* __restrict__ dst,
         const precision_t* __restrict__ src,
@@ -459,44 +201,6 @@ __global__ void mask_actor_obs_kernel(
     dst[idx] = masked ? from_float(0.0f) : src[idx];
 }
 
-__global__ void priv_critic_extract_input_kernel(
-        precision_t* __restrict__ dst,
-        const precision_t* __restrict__ obs,
-        int rows, int obs_dim, int input_dim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = rows * input_dim;
-    if (idx >= total) return;
-    int row = idx / input_dim;
-    int col = idx % input_dim;
-    dst[idx] = col < obs_dim ? obs[row * obs_dim + col] : from_float(0.0f);
-}
-
-__global__ void relu_inplace_kernel(precision_t* __restrict__ x, int n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        x[idx] = from_float(relu(to_float(x[idx])));
-    }
-}
-
-__global__ void relu_backward_inplace_kernel(
-        precision_t* __restrict__ grad,
-        const precision_t* __restrict__ activated,
-        int n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n && to_float(activated[idx]) <= 0.0f) {
-        grad[idx] = from_float(0.0f);
-    }
-}
-
-__global__ void overwrite_fused_value_kernel(
-        precision_t* __restrict__ fused,
-        const precision_t* __restrict__ value,
-        int rows, int fused_dim) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= rows) return;
-    fused[row * fused_dim + fused_dim - 1] = value[row];
-}
-
 PrecisionTensor make_actor_obs(PrecisionTensor& dst, PrecisionTensor& src,
         int mask_prefix, int mask_target, cudaStream_t stream) {
     if (mask_prefix <= 0 && !mask_target) return src;
@@ -505,38 +209,6 @@ PrecisionTensor make_actor_obs(PrecisionTensor& dst, PrecisionTensor& src,
     mask_actor_obs_kernel<<<grid_size(rows * obs_dim), BLOCK_SIZE, 0, stream>>>(
         dst.data, src.data, rows, obs_dim, mask_prefix, mask_target);
     return dst;
-}
-
-PrecisionTensor priv_critic_forward(PrivCriticWeights& w, PrivCriticActivations& a,
-        PrecisionTensor obs, cudaStream_t stream) {
-    int rows = numel(obs.shape) / obs.shape[ndim(obs.shape) - 1];
-    int obs_dim = obs.shape[ndim(obs.shape) - 1];
-    priv_critic_extract_input_kernel<<<grid_size(rows * w.input_dim), BLOCK_SIZE, 0, stream>>>(
-        a.input.data, obs.data, rows, obs_dim, w.input_dim);
-    puf_mm(&a.input, &w.w1, &a.hidden, stream);
-    relu_inplace_kernel<<<grid_size(numel(a.hidden.shape)), BLOCK_SIZE, 0, stream>>>(
-        a.hidden.data, numel(a.hidden.shape));
-    puf_mm(&a.hidden, &w.w2, &a.value, stream);
-    return a.value;
-}
-
-void overwrite_fused_value(PrecisionTensor& fused, PrecisionTensor& value, cudaStream_t stream) {
-    int fused_dim = fused.shape[ndim(fused.shape) - 1];
-    int rows = numel(fused.shape) / fused_dim;
-    overwrite_fused_value_kernel<<<grid_size(rows), BLOCK_SIZE, 0, stream>>>(
-        fused.data, value.data, rows, fused_dim);
-}
-
-void priv_critic_backward(PrivCriticWeights& w, PrivCriticActivations& a,
-        FloatTensor grad_value, cudaStream_t stream) {
-    int rows = numel(grad_value.shape);
-    cast<<<grid_size(rows), BLOCK_SIZE, 0, stream>>>(
-        a.grad_value.data, grad_value.data, rows);
-    puf_mm_tn(&a.grad_value, &a.hidden, &a.wgrad2_scratch, stream);
-    puf_mm_nn(&a.grad_value, &w.w2, &a.grad_hidden, stream);
-    relu_backward_inplace_kernel<<<grid_size(numel(a.grad_hidden.shape)), BLOCK_SIZE, 0, stream>>>(
-        a.grad_hidden.data, a.hidden.data, numel(a.grad_hidden.shape));
-    puf_mm_tn(&a.grad_hidden, &a.input, &a.wgrad1_scratch, stream);
 }
 
 // Prioritized replay over single-epoch data. These kernels are
@@ -633,16 +305,6 @@ typedef struct {
     float prio_beta0;
     float epopt_alpha;
     float epopt_quantile;
-    // Visual predictive auxiliary loss
-    float aux_vis_coef;
-    float aux_vis_frac;
-    int aux_vis_obs_offset;
-    int aux_vis_width;
-    int aux_vis_height;
-    int aux_vis_channels;
-    float privileged_critic;
-    int privileged_critic_obs_dim;
-    int privileged_critic_hidden;
     int actor_obs_mask_prefix;
     float actor_obs_mask_target;
     // Flags
@@ -687,13 +349,6 @@ typedef struct {
     FloatTensor losses_puf;     // (NUM_LOSSES,) f32 accumulator
     PPOBuffersPuf ppo_bufs_puf; // Pre-allocated buffers for ppo_loss_fwd_bwd
     PrioBuffers prio_bufs;      // Pre-allocated buffers for prio_replay
-    bool aux_vis_enabled;
-    AuxVisWeights aux_vis_weights;
-    AuxVisActivations aux_vis_activations;
-    bool privileged_critic_enabled;
-    PrivCriticWeights priv_critic_weights;
-    PrivCriticActivations priv_critic_train_activations;
-    PrivCriticActivations* priv_critic_rollout_activations;
     PrecisionTensor train_actor_obs;
     PrecisionTensor* rollout_actor_obs;
     FloatTensor master_weights;  // fp32 master weights (flat); same buffer as param_puf in fp32 mode
@@ -957,13 +612,6 @@ extern "C" void net_callback_wrapper(void* ctx, int buf, int t) {
             stream);
     }
     PrecisionTensor dec_puf = policy_forward(&pufferl->policy, pufferl->weights, pufferl->buffer_activations[buf], actor_obs, state_puf, stream);
-    if (pufferl->privileged_critic_enabled) {
-        PrecisionTensor critic_value = priv_critic_forward(
-            pufferl->priv_critic_weights,
-            pufferl->priv_critic_rollout_activations[buf],
-            obs_dst, stream);
-        overwrite_fused_value(dec_puf, critic_value, stream);
-    }
 
     // Sample actions, logprobs, values into rollout buffer
     PrecisionTensor act_slice = puf_slice(rollouts.actions, t, start, block_size);
@@ -1905,15 +1553,6 @@ void train_impl(PuffeRL& pufferl) {
             }
             PrecisionTensor state_puf = graph.mb_state;
             PrecisionTensor dec_puf = policy_forward_train(&pufferl.policy, pufferl.weights, pufferl.train_activations, actor_obs_puf, state_puf, stream);
-            if (pufferl.privileged_critic_enabled) {
-                PrecisionTensor flat_obs = graph.mb_obs;
-                puf_squeeze(&flat_obs, 0);
-                PrecisionTensor critic_value = priv_critic_forward(
-                    pufferl.priv_critic_weights,
-                    pufferl.priv_critic_train_activations,
-                    flat_obs, stream);
-                overwrite_fused_value(dec_puf, critic_value, stream);
-            }
             DecoderWeights* dw_train = (DecoderWeights*)pufferl.weights.decoder;
             PrecisionTensor p_logstd;
             if (dw_train->continuous) {
@@ -1926,48 +1565,9 @@ void train_impl(PuffeRL& pufferl) {
                 pufferl.ppo_bufs_puf, pufferl.is_continuous, stream);
 
             PrecisionTensor extra_grad_hidden = {};
-            if (pufferl.aux_vis_enabled) {
-                DecoderActivations* dec_acts = (DecoderActivations*)pufferl.train_activations.decoder;
-                PrecisionTensor hidden_puf = dec_acts->saved_input;
-                PrecisionTensor aux_pred = aux_vis_forward(
-                    pufferl.aux_vis_weights, pufferl.aux_vis_activations,
-                    hidden_puf, graph.mb_actions, graph.mb_actions.shape[2], stream);
-                cudaMemsetAsync(pufferl.aux_vis_activations.grad_pred.data, 0,
-                    numel(pufferl.aux_vis_activations.grad_pred.shape) * sizeof(precision_t), stream);
-                int B_aux = graph.mb_obs.shape[0];
-                int T_aux = graph.mb_obs.shape[1];
-                int obs_size_aux = graph.mb_obs.shape[2];
-                int aux_threads = B_aux * T_aux * hypers.aux_vis_channels;
-                aux_vis_moments_loss<<<grid_size(aux_threads), BLOCK_SIZE, 0, stream>>>(
-                    aux_pred.data,
-                    pufferl.aux_vis_activations.grad_pred.data,
-                    graph.mb_obs.data,
-                    graph.mb_terminals.data,
-                    pufferl.losses_puf.data,
-                    B_aux, T_aux, obs_size_aux,
-                    hypers.aux_vis_obs_offset,
-                    hypers.aux_vis_width,
-                    hypers.aux_vis_height,
-                    hypers.aux_vis_channels,
-                    hypers.aux_vis_coef,
-                    hypers.aux_vis_frac);
-                extra_grad_hidden = aux_vis_backward(
-                    pufferl.aux_vis_weights, pufferl.aux_vis_activations,
-                    pufferl.policy.hidden_dim, stream);
-            }
-
             FloatTensor grad_logits_puf = pufferl.ppo_bufs_puf.grad_logits;
             FloatTensor grad_logstd_puf = pufferl.is_continuous ? pufferl.ppo_bufs_puf.grad_logstd : FloatTensor();
             FloatTensor grad_values_puf = pufferl.ppo_bufs_puf.grad_values;
-            if (pufferl.privileged_critic_enabled) {
-                FloatTensor critic_grad_values = grad_values_puf;
-                puf_squeeze(&critic_grad_values, 0);
-                priv_critic_backward(
-                    pufferl.priv_critic_weights,
-                    pufferl.priv_critic_train_activations,
-                    critic_grad_values, stream);
-                puf_zero(&grad_values_puf, stream);
-            }
             policy_backward(&pufferl.policy, pufferl.weights, pufferl.train_activations,
                 grad_logits_puf, grad_logstd_puf, grad_values_puf, extra_grad_hidden, stream);
 
@@ -2156,38 +1756,7 @@ std::unique_ptr<PuffeRL> create_pufferl_impl(HypersT& hypers,
 
     // Buffers for weights, grads, and activations
     pufferl->weights = policy_weights_create(&pufferl->policy, params);
-    pufferl->aux_vis_enabled = hypers.aux_vis_coef > 0.0f
-        && hypers.aux_vis_width > 0
-        && hypers.aux_vis_height > 0
-        && hypers.aux_vis_channels > 0
-        && hypers.aux_vis_obs_offset >= 0;
-    if (pufferl->aux_vis_enabled) {
-        int aux_input_dim = hidden_size + num_action_heads;
-        int aux_output_dim = hypers.aux_vis_channels * AUX_VIS_MOMENTS_PER_CHANNEL;
-        aux_vis_reg_params(pufferl->aux_vis_weights, params, aux_input_dim, aux_output_dim);
-    }
-    int priv_critic_dim = hypers.privileged_critic_obs_dim > 0
-        ? std::min(hypers.privileged_critic_obs_dim, input_size)
-        : 0;
-    int priv_critic_hidden = hypers.privileged_critic_hidden > 0
-        ? hypers.privileged_critic_hidden
-        : hidden_size;
-    pufferl->privileged_critic_enabled = hypers.privileged_critic > 0.0f
-        && priv_critic_dim > 0
-        && priv_critic_hidden > 0;
-    if (pufferl->privileged_critic_enabled) {
-        priv_critic_reg_params(pufferl->priv_critic_weights,
-            params, priv_critic_dim, priv_critic_hidden);
-    }
     pufferl->train_activations = policy_reg_train(&pufferl->policy, pufferl->weights, acts, grads, B_TT);
-    if (pufferl->aux_vis_enabled) {
-        aux_vis_reg_train(pufferl->aux_vis_weights, pufferl->aux_vis_activations,
-            acts, grads, B_TT, hidden_size);
-    }
-    if (pufferl->privileged_critic_enabled) {
-        priv_critic_reg_activations(pufferl->priv_critic_weights,
-            pufferl->priv_critic_train_activations, acts, grads, B_TT);
-    }
     bool actor_obs_masking = hypers.actor_obs_mask_prefix > 0
         || hypers.actor_obs_mask_target > 0.0f;
     if (actor_obs_masking) {
@@ -2196,17 +1765,11 @@ std::unique_ptr<PuffeRL> create_pufferl_impl(HypersT& hypers,
     }
     pufferl->buffer_activations = (PolicyActivations*)calloc(num_buffers, sizeof(PolicyActivations));
     pufferl->buffer_states = (PrecisionTensor*)calloc(num_buffers, sizeof(PrecisionTensor));
-    pufferl->priv_critic_rollout_activations =
-        (PrivCriticActivations*)calloc(num_buffers, sizeof(PrivCriticActivations));
     pufferl->rollout_actor_obs =
         (PrecisionTensor*)calloc(num_buffers, sizeof(PrecisionTensor));
     for (int i = 0; i < num_buffers; i++) {
         pufferl->buffer_activations[i] = policy_reg_rollout(
             &pufferl->policy, pufferl->weights, acts, inf_batch);
-        if (pufferl->privileged_critic_enabled) {
-            priv_critic_reg_activations(pufferl->priv_critic_weights,
-                pufferl->priv_critic_rollout_activations[i], acts, nullptr, inf_batch);
-        }
         if (actor_obs_masking) {
             pufferl->rollout_actor_obs[i] = {.shape = {inf_batch, input_size}};
             alloc_register(acts, &pufferl->rollout_actor_obs[i]);
@@ -2261,12 +1824,6 @@ std::unique_ptr<PuffeRL> create_pufferl_impl(HypersT& hypers,
 
     ulong init_seed = hypers.seed;
     policy_init_weights(&pufferl->policy, pufferl->weights, &init_seed, pufferl->default_stream);
-    if (pufferl->aux_vis_enabled) {
-        aux_vis_init_weights(pufferl->aux_vis_weights, &init_seed, pufferl->default_stream);
-    }
-    if (pufferl->privileged_critic_enabled) {
-        priv_critic_init_weights(pufferl->priv_critic_weights, &init_seed, pufferl->default_stream);
-    }
     pufferl->master_weights = {.data = (float*)pufferl->param_puf.data, .shape = {params->total_elems}};
     if (USE_BF16) {
         pufferl->master_weights = {.shape = {params->total_elems}};
@@ -2433,7 +1990,6 @@ void close_impl(PuffeRL& pufferl) {
 
     free(pufferl.buffer_states);
     free(pufferl.buffer_activations);
-    free(pufferl.priv_critic_rollout_activations);
     free(pufferl.rollout_actor_obs);
     free(pufferl.fused_rollout_cudagraphs);
     free(pufferl.streams);

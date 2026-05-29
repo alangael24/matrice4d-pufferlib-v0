@@ -51,7 +51,6 @@ pybind11::dict puf_log(pybind11::object pufferl_obj) {
         losses_dict["old_kl"] = losses_host[LOSS_OLD_APPROX_KL] * inv_n;
         losses_dict["kl"] = losses_host[LOSS_APPROX_KL] * inv_n;
         losses_dict["clipfrac"] = losses_host[LOSS_CLIPFRAC] * inv_n;
-        losses_dict["aux_vis"] = losses_host[LOSS_AUX_VIS] * inv_n;
     }
     cudaMemset(pufferl.losses_puf.data, 0, numel(pufferl.losses_puf.shape) * sizeof(float));
     result["loss"] = losses_dict;
@@ -504,17 +503,7 @@ std::unique_ptr<PuffeRL> create_pufferl(py::dict args) {
     hypers.prio_beta0 = get_config(train_kwargs, "prio_beta0");
     hypers.epopt_alpha = get_config(train_kwargs, "epopt_alpha");
     hypers.epopt_quantile = get_config(train_kwargs, "epopt_quantile");
-    // Visual predictive auxiliary loss
-    hypers.aux_vis_coef = get_config(train_kwargs, "aux_vis_coef");
-    hypers.aux_vis_frac = get_config(train_kwargs, "aux_vis_frac");
-    hypers.aux_vis_obs_offset = get_config(train_kwargs, "aux_vis_obs_offset");
-    hypers.aux_vis_width = get_config(train_kwargs, "aux_vis_width");
-    hypers.aux_vis_height = get_config(train_kwargs, "aux_vis_height");
-    hypers.aux_vis_channels = get_config(train_kwargs, "aux_vis_channels");
-    // Privileged critic / actor observation masking
-    hypers.privileged_critic = get_config(train_kwargs, "privileged_critic");
-    hypers.privileged_critic_obs_dim = get_config(train_kwargs, "privileged_critic_obs_dim");
-    hypers.privileged_critic_hidden = get_config(train_kwargs, "privileged_critic_hidden");
+    // Actor observation masking
     hypers.actor_obs_mask_prefix = get_config(train_kwargs, "actor_obs_mask_prefix");
     hypers.actor_obs_mask_target = get_config(train_kwargs, "actor_obs_mask_target");
     hypers.reset_state = get_config(args, "reset_state");
@@ -643,15 +632,6 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("prio_beta0", &HypersT::prio_beta0)
         .def_readwrite("epopt_alpha", &HypersT::epopt_alpha)
         .def_readwrite("epopt_quantile", &HypersT::epopt_quantile)
-        .def_readwrite("aux_vis_coef", &HypersT::aux_vis_coef)
-        .def_readwrite("aux_vis_frac", &HypersT::aux_vis_frac)
-        .def_readwrite("aux_vis_obs_offset", &HypersT::aux_vis_obs_offset)
-        .def_readwrite("aux_vis_width", &HypersT::aux_vis_width)
-        .def_readwrite("aux_vis_height", &HypersT::aux_vis_height)
-        .def_readwrite("aux_vis_channels", &HypersT::aux_vis_channels)
-        .def_readwrite("privileged_critic", &HypersT::privileged_critic)
-        .def_readwrite("privileged_critic_obs_dim", &HypersT::privileged_critic_obs_dim)
-        .def_readwrite("privileged_critic_hidden", &HypersT::privileged_critic_hidden)
         .def_readwrite("actor_obs_mask_prefix", &HypersT::actor_obs_mask_prefix)
         .def_readwrite("actor_obs_mask_target", &HypersT::actor_obs_mask_target)
         .def_readwrite("cudagraphs", &HypersT::cudagraphs)
