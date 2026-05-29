@@ -255,6 +255,75 @@ static inline Vec3 race_next_gate_pos(const Drone* agent) {
 }
 
 // ---------------------------------------------------------------------------
+// Causal motor-basis turn assist.
+//
+// This is not a final controller. It is a first-principles diagnostic.
+//
+// Motor order is [FL, FR, RL, RR].
+//
+// pattern 0: roll  + [+,+,-,-]
+// pattern 1: roll  - [-,-,+,+]
+// pattern 2: pitch + [+,-,+,-]
+// pattern 3: pitch - [-,+,-,+]
+// pattern 4: yaw   + [+,-,-,+]
+// pattern 5: yaw   - [-,+,+,-]
+//
+// The command magnitude is proportional to target lateral bearing in body
+// frame. If none of these patterns can bend the trajectory toward the target,
+// the issue is not reward/curriculum; it is target/sign/action plumbing.
+// ---------------------------------------------------------------------------
+#define M4D_TURN_ASSIST_ENABLED 0
+#define M4D_TURN_ASSIST_PATTERN 0
+#define M4D_TURN_ASSIST_GAIN 0.20f
+#define M4D_TURN_ASSIST_MIN_IDX 2
+#define M4D_TURN_ASSIST_LOOKAHEAD 0
+#define M4D_TURN_ASSIST_DEADBAND 0.03f
+
+static inline void race_turn_assist_basis(int pattern, float b[4]) {
+    if (pattern == 0) {
+        b[0] =  1.0f; b[1] =  1.0f; b[2] = -1.0f; b[3] = -1.0f;
+    } else if (pattern == 1) {
+        b[0] = -1.0f; b[1] = -1.0f; b[2] =  1.0f; b[3] =  1.0f;
+    } else if (pattern == 2) {
+        b[0] =  1.0f; b[1] = -1.0f; b[2] =  1.0f; b[3] = -1.0f;
+    } else if (pattern == 3) {
+        b[0] = -1.0f; b[1] =  1.0f; b[2] = -1.0f; b[3] =  1.0f;
+    } else if (pattern == 4) {
+        b[0] =  1.0f; b[1] = -1.0f; b[2] = -1.0f; b[3] =  1.0f;
+    } else {
+        b[0] = -1.0f; b[1] =  1.0f; b[2] =  1.0f; b[3] = -1.0f;
+    }
+}
+
+static inline void race_apply_turn_assist(Drone* agent, float raw_actions[4]) {
+    if (!(M4D_TURN_ASSIST_ENABLED > 0)) return;
+    if (agent->buffer == NULL || agent->buffer_size <= 0) return;
+
+    int idx = race_clamped_gate_idx(agent);
+    if (idx < M4D_TURN_ASSIST_MIN_IDX) return;
+
+    int aim_idx = idx + M4D_TURN_ASSIST_LOOKAHEAD;
+    if (aim_idx >= agent->buffer_size) aim_idx = agent->buffer_size - 1;
+    if (aim_idx < 0) aim_idx = 0;
+
+    Vec3 to_world = sub3(agent->buffer[aim_idx].pos, agent->state.pos);
+    float dist = fmaxf(norm3(to_world), 1e-6f);
+    Quat q_inv = quat_inverse(agent->state.quat);
+    Vec3 to_body = quat_rotate(q_inv, to_world);
+
+    float lateral = clampf(to_body.y / dist, -1.0f, 1.0f);
+    if (fabsf(lateral) < M4D_TURN_ASSIST_DEADBAND) return;
+
+    float basis[4];
+    race_turn_assist_basis(M4D_TURN_ASSIST_PATTERN, basis);
+
+    float cmd = M4D_TURN_ASSIST_GAIN * lateral;
+    for (int m = 0; m < 4; m++) {
+        raw_actions[m] = clampf(raw_actions[m] + cmd * basis[m], -1.0f, 1.0f);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Navigation tutor for causal diagnosis and distillation.
 //
 // Important:
@@ -1464,6 +1533,9 @@ void c_step(DroneEnv* env) {
             env->actions[4 * i + 3],
         };
         apply_pal_probe(env, agent, raw_actions);
+        if (env->task == RACE) {
+            race_apply_turn_assist(agent, raw_actions);
+        }
         float action_delta_mean = 0.0f;
         if (agent->has_prev_action) {
             for (int m = 0; m < 4; m++) {

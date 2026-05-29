@@ -520,14 +520,68 @@ __device__ __forceinline__ float3 race_next_gate_pos_dev(const DroneCudaState* s
     return s->ring_pos[next_idx];
 }
 
+// Causal motor-basis turn assist. Mirrors the CPU diagnostic.
+#define M4D_TURN_ASSIST_ENABLED 0
+#define M4D_TURN_ASSIST_PATTERN 0
+#define M4D_TURN_ASSIST_GAIN 0.20f
+#define M4D_TURN_ASSIST_MIN_IDX 2
+#define M4D_TURN_ASSIST_LOOKAHEAD 0
+#define M4D_TURN_ASSIST_DEADBAND 0.03f
+
+__device__ __forceinline__ float4 quat_inverse_dev(float4 q);
+__device__ __forceinline__ float3 quat_rotate_dev(float4 q, float3 v);
+
+__device__ __forceinline__ void race_turn_assist_basis_dev(int pattern, float b[4]) {
+    if (pattern == 0) {
+        b[0] =  1.0f; b[1] =  1.0f; b[2] = -1.0f; b[3] = -1.0f;
+    } else if (pattern == 1) {
+        b[0] = -1.0f; b[1] = -1.0f; b[2] =  1.0f; b[3] =  1.0f;
+    } else if (pattern == 2) {
+        b[0] =  1.0f; b[1] = -1.0f; b[2] =  1.0f; b[3] = -1.0f;
+    } else if (pattern == 3) {
+        b[0] = -1.0f; b[1] =  1.0f; b[2] = -1.0f; b[3] =  1.0f;
+    } else if (pattern == 4) {
+        b[0] =  1.0f; b[1] = -1.0f; b[2] = -1.0f; b[3] =  1.0f;
+    } else {
+        b[0] = -1.0f; b[1] =  1.0f; b[2] =  1.0f; b[3] = -1.0f;
+    }
+}
+
+__device__ __forceinline__ void race_apply_turn_assist_dev(const DroneCudaState* s,
+                                                           float raw_actions[4]) {
+    if (!(M4D_TURN_ASSIST_ENABLED > 0)) return;
+    if (s->buffer_size <= 0) return;
+
+    int idx = race_clamped_gate_idx_dev(s);
+    if (idx < M4D_TURN_ASSIST_MIN_IDX) return;
+
+    int aim_idx = idx + M4D_TURN_ASSIST_LOOKAHEAD;
+    if (aim_idx >= s->buffer_size) aim_idx = s->buffer_size - 1;
+    if (aim_idx < 0) aim_idx = 0;
+
+    float3 to_world = sub3_dev(s->ring_pos[aim_idx], s->pos);
+    float dist = fmaxf(norm3_dev(to_world), 1e-6f);
+    float4 q_inv = quat_inverse_dev(s->quat);
+    float3 to_body = quat_rotate_dev(q_inv, to_world);
+
+    float lateral = clampf_dev(to_body.y / dist, -1.0f, 1.0f);
+    if (fabsf(lateral) < M4D_TURN_ASSIST_DEADBAND) return;
+
+    float basis[4];
+    race_turn_assist_basis_dev(M4D_TURN_ASSIST_PATTERN, basis);
+
+    float cmd = M4D_TURN_ASSIST_GAIN * lateral;
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        raw_actions[k] = clampf_dev(raw_actions[k] + cmd * basis[k], -1.0f, 1.0f);
+    }
+}
+
 // Navigation tutor for causal diagnosis and distillation.
 // Reuses obs[10..18] when the target-vector fields are masked.
 #define M4D_NAV_TUTOR_ENABLED 0
 #define M4D_NAV_TUTOR_GAIN 1.0f
 #define M4D_NAV_TUTOR_DIST_SCALE 30.0f
-
-__device__ __forceinline__ float4 quat_inverse_dev(float4 q);
-__device__ __forceinline__ float3 quat_rotate_dev(float4 q, float3 v);
 
 __device__ __forceinline__ void race_fill_nav_tutor_obs_dev(const DroneCudaState* s, float* obs) {
     if (!(M4D_NAV_TUTOR_ENABLED > 0)) return;
@@ -2888,6 +2942,9 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
         raw_actions[k] = actions[(size_t)i * DRONE_NUM_ATNS + k];
     }
     apply_pal_probe_dev(cfg, &s, raw_actions);
+    if (cfg.task == DRONE_TASK_RACE) {
+        race_apply_turn_assist_dev(&s, raw_actions);
+    }
 
     float action_delta_mean = 0.0f;
     if (s.has_prev_action) {
