@@ -95,12 +95,13 @@ run_one() {
   local angle="$4"
   local orig="$5"
   local thrust="$6"
+  local oob_radius="$7"
 
   echo
   echo "============================================================"
   echo "RUN $name"
   echo "base=$base"
-  echo "angle=$angle orig=$orig thrust=$thrust total=$total"
+  echo "angle=$angle orig=$orig thrust=$thrust oob=$oob_radius total=$total"
   echo "============================================================"
   echo
 
@@ -115,7 +116,7 @@ run_one() {
   export MAX_RINGS=3
   export RACE_SEGMENT_MODE=0.0
   export RACE_TRACK_MODE=1.0
-  export OOB_RADIUS=18.0
+  export OOB_RADIUS="$oob_radius"
 
   export RACE_RESET_START_PROB=1.0
   export RACE_RESET_T_MIN=0.00
@@ -163,34 +164,37 @@ run_one() {
 
 # 0) Same original track, but without punishing the required yaw.
 run_one "direct_orig_yawunlock_T080" \
-  "$BASE_N2" "$TOTAL_DIRECT" "128.126175972" "1" "0.80"
+  "$BASE_N2" "$TOTAL_DIRECT" "128.126175972" "1" "0.80" "18.0"
 DIRECT_ORIG_CKPT="$LAST_CKPT"
 
 # 1-5) Angle curriculum. 60 deg is just above observed effective turning.
+# The reduced-angle G2 positions can sit near/outside the original global
+# OOB radius even when the segment length is preserved, so use a wider OOB
+# only for the intermediate curriculum. The original track runs still use 18.
 run_one "turn060_yawunlock_T080_from_n2" \
-  "$BASE_N2" "$TOTAL_STAGE" "60" "0" "0.80"
+  "$BASE_N2" "$TOTAL_STAGE" "60" "0" "0.80" "24.0"
 CKPT_60="$LAST_CKPT"
 
 run_one "turn075_yawunlock_T080_from_60" \
-  "$CKPT_60" "$TOTAL_STAGE" "75" "0" "0.80"
+  "$CKPT_60" "$TOTAL_STAGE" "75" "0" "0.80" "24.0"
 CKPT_75="$LAST_CKPT"
 
 run_one "turn090_yawunlock_T080_from_75" \
-  "$CKPT_75" "$TOTAL_STAGE" "90" "0" "0.80"
+  "$CKPT_75" "$TOTAL_STAGE" "90" "0" "0.80" "24.0"
 CKPT_90="$LAST_CKPT"
 
 run_one "turn105_yawunlock_T080_from_90" \
-  "$CKPT_90" "$TOTAL_STAGE" "105" "0" "0.80"
+  "$CKPT_90" "$TOTAL_STAGE" "105" "0" "0.80" "24.0"
 CKPT_105="$LAST_CKPT"
 
 # 6) Original full angle from the angular curriculum.
 run_one "turn128_orig_yawunlock_T080_from_105" \
-  "$CKPT_105" "$TOTAL_STAGE" "128.126175972" "1" "0.80"
+  "$CKPT_105" "$TOTAL_STAGE" "128.126175972" "1" "0.80" "18.0"
 CKPT_128_T080="$LAST_CKPT"
 
 # 7) Same original full angle, lower thrust cap.
 run_one "turn128_orig_yawunlock_T065_from_105" \
-  "$CKPT_105" "$TOTAL_STAGE" "128.126175972" "1" "0.65"
+  "$CKPT_105" "$TOTAL_STAGE" "128.126175972" "1" "0.65" "18.0"
 CKPT_128_T065="$LAST_CKPT"
 
 # Leave source in original geometry after the batch.
