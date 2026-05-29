@@ -984,6 +984,61 @@ static inline float race_pass_margin(Drone* agent, int gate_idx) {
     return gate->radius - dist;
 }
 
+// Physics-gated turn-speed curriculum.
+//
+// The hard N3 transition is limited by lateral acceleration, not just yaw rate:
+//   R = L / (2 sin(theta/2))
+//   a_req = v^2 / R
+//   a_lat_max = sqrt((Tmax_total / mass)^2 - g^2)
+// With the current Matrice constants and NORMALIZED_THRUST_MAX=0.80, the
+// original G1->G2 turn has v_safe around 9.5 m/s, or about 8.5 m/s with margin.
+#define M4D_TURN_SPEED_LIMIT_ENABLED 0
+#define M4D_TURN_SPEED_LIMIT 8.5f
+#define M4D_TURN_SPEED_START 12.0f
+#define M4D_TURN_MIN_ANGLE 0.70f
+
+static inline float race_smoothstep01(float x) {
+    x = clampf(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+static inline float race_turn_angle_at_gate_math(const Drone* agent, int idx) {
+    if (agent->buffer == NULL || agent->buffer_size <= 0) return 0.0f;
+    if (idx <= 0 || idx + 1 >= agent->buffer_size) return 0.0f;
+
+    Vec3 prev = agent->buffer[idx - 1].pos;
+    Vec3 cur = agent->buffer[idx].pos;
+    Vec3 next = agent->buffer[idx + 1].pos;
+
+    Vec3 in_dir = normalize3_or(sub3(cur, prev), agent->buffer[idx].normal);
+    Vec3 out_dir = normalize3_or(sub3(next, cur), agent->buffer[idx].normal);
+    return acosf(clampf(dot3(in_dir, out_dir), -1.0f, 1.0f));
+}
+
+static inline void race_apply_turn_speed_limit_math(Drone* agent) {
+    if (!(M4D_TURN_SPEED_LIMIT_ENABLED > 0)) return;
+    if (agent->buffer == NULL || agent->buffer_size <= 0) return;
+
+    int idx = race_clamped_gate_idx(agent);
+    if (idx <= 0 || idx + 1 >= agent->buffer_size) return;
+
+    float theta = race_turn_angle_at_gate_math(agent, idx);
+    if (theta < M4D_TURN_MIN_ANGLE) return;
+
+    Vec3 cur = agent->buffer[idx].pos;
+    float d = norm3(sub3(cur, agent->state.pos));
+    float w = race_smoothstep01((M4D_TURN_SPEED_START - d) / M4D_TURN_SPEED_START);
+    if (w <= 0.0f) return;
+
+    float high_cap = agent->params.max_vel;
+    float local_cap = high_cap * (1.0f - w) + M4D_TURN_SPEED_LIMIT * w;
+    float speed = norm3(agent->state.vel);
+
+    if (speed > local_cap && speed > 1e-6f) {
+        agent->state.vel = scalmul3(agent->state.vel, local_cap / speed);
+    }
+}
+
 static inline void race_isb_perturb_state(DroneEnv* env, Drone* agent) {
     float pos_xy = env->race_isb_pos_xy > 0.0f ? env->race_isb_pos_xy : 0.45f;
     float pos_z = env->race_isb_z > 0.0f ? env->race_isb_z : 0.25f;
@@ -1365,6 +1420,9 @@ void c_step(DroneEnv* env) {
         float delayed_actions[4];
         apply_action_latency(agent, raw_actions, env_action_latency_steps(env), delayed_actions);
         move_drone(agent, delayed_actions);
+        if (env->task == RACE) {
+            race_apply_turn_speed_limit_math(agent);
+        }
         agent->episode_length++;
 
         bool oob = norm3(sub3(agent->target->pos, agent->state.pos)) > env->oob_radius;

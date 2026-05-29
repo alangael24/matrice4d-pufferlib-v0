@@ -1941,6 +1941,58 @@ __device__ float race_pass_margin_dev(const DroneCudaState* s, int gate_idx) {
     return s->ring_radius[gate_idx] - dist;
 }
 
+// Keep these constants mirrored with ocean/drone/drone.h. The physics batch
+// edits both files before each rebuild so CUDA training uses the same setup as
+// the CPU renderer/eval path.
+#define M4D_TURN_SPEED_LIMIT_ENABLED 0
+#define M4D_TURN_SPEED_LIMIT 8.5f
+#define M4D_TURN_SPEED_START 12.0f
+#define M4D_TURN_MIN_ANGLE 0.70f
+
+__device__ __forceinline__ float race_smoothstep01_dev(float x) {
+    x = clampf_dev(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+__device__ __forceinline__ float race_turn_angle_at_gate_math_dev(
+        const DroneCudaState* s, int idx) {
+    if (s->buffer_size <= 0) return 0.0f;
+    if (idx <= 0 || idx + 1 >= s->buffer_size) return 0.0f;
+
+    float3 prev = s->ring_pos[idx - 1];
+    float3 cur = s->ring_pos[idx];
+    float3 next = s->ring_pos[idx + 1];
+
+    float3 in_dir = normalize3_dev(sub3_dev(cur, prev), s->ring_normal[idx]);
+    float3 out_dir = normalize3_dev(sub3_dev(next, cur), s->ring_normal[idx]);
+    return acosf(clampf_dev(dot3_dev(in_dir, out_dir), -1.0f, 1.0f));
+}
+
+__device__ __forceinline__ void race_apply_turn_speed_limit_math_dev(
+        DroneCudaState* s, const DroneCudaParams* p) {
+    if (!(M4D_TURN_SPEED_LIMIT_ENABLED > 0)) return;
+    if (s->buffer_size <= 0) return;
+
+    int idx = race_clamped_gate_idx_dev(s);
+    if (idx <= 0 || idx + 1 >= s->buffer_size) return;
+
+    float theta = race_turn_angle_at_gate_math_dev(s, idx);
+    if (theta < M4D_TURN_MIN_ANGLE) return;
+
+    float3 cur = s->ring_pos[idx];
+    float d = norm3_dev(sub3_dev(cur, s->pos));
+    float w = race_smoothstep01_dev((M4D_TURN_SPEED_START - d) / M4D_TURN_SPEED_START);
+    if (w <= 0.0f) return;
+
+    float high_cap = p->max_vel;
+    float local_cap = high_cap * (1.0f - w) + M4D_TURN_SPEED_LIMIT * w;
+    float speed = norm3_dev(s->vel);
+
+    if (speed > local_cap && speed > 1e-6f) {
+        s->vel = scale3_dev(s->vel, local_cap / speed);
+    }
+}
+
 __device__ void race_isb_push_dev(const DroneCudaCtx& cfg, int agent_idx,
                                   const DroneCudaState* s, int target_idx,
                                   float pass_margin) {
@@ -2816,6 +2868,9 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
     }
 
     move_drone_dev(&s, &p, delayed_actions);
+    if (cfg.task == DRONE_TASK_RACE) {
+        race_apply_turn_speed_limit_math_dev(&s, &p);
+    }
     s.episode_length++;
 
     float curr_dist = norm3_dev(sub3_dev(s.target_pos, s.pos));
