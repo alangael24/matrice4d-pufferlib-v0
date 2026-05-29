@@ -1941,102 +1941,6 @@ __device__ float race_pass_margin_dev(const DroneCudaState* s, int gate_idx) {
     return s->ring_radius[gate_idx] - dist;
 }
 
-#define M4D_RACE_TURN_VSAFE 8.0f
-#define M4D_RACE_TURN_START 9.0f
-#define M4D_RACE_SPEED_K 0.050f
-#define M4D_RACE_CENTER_K 0.020f
-#define M4D_RACE_CENTER_CORRIDOR 1.50f
-#define M4D_RACE_LOOKAHEAD_FRAC 0.45f
-
-__device__ __forceinline__ float race_smoothstep01_dev(float x) {
-    x = clampf_dev(x, 0.0f, 1.0f);
-    return x * x * (3.0f - 2.0f * x);
-}
-
-__device__ float race_turn_angle_at_gate_dev(const DroneCudaState* s, int idx) {
-    if (s->buffer_size <= 0) return 0.0f;
-    if (idx <= 0 || idx + 1 >= s->buffer_size) return 0.0f;
-
-    float3 prev = s->ring_pos[idx - 1];
-    float3 cur = s->ring_pos[idx];
-    float3 next = s->ring_pos[idx + 1];
-
-    float3 in_dir = normalize3_dev(sub3_dev(cur, prev), s->ring_normal[idx]);
-    float3 out_dir = normalize3_dev(sub3_dev(next, cur), s->ring_normal[idx]);
-    float c = clampf_dev(dot3_dev(in_dir, out_dir), -1.0f, 1.0f);
-    return acosf(c);
-}
-
-__device__ float3 race_reward_lookahead_point_dev(const DroneCudaState* s, float3 pos) {
-    if (s->buffer_size <= 0) {
-        return s->target_pos;
-    }
-
-    int idx = race_clamped_gate_idx_dev(s);
-    float3 cur = s->ring_pos[idx];
-
-    if (idx + 1 >= s->buffer_size) {
-        return cur;
-    }
-
-    float theta = race_turn_angle_at_gate_dev(s, idx);
-    float turn_w = clampf_dev(theta / 1.5707963f, 0.0f, 1.0f);
-
-    float3 next = s->ring_pos[idx + 1];
-    float3 exit_wp = add3_dev(cur, scale3_dev(sub3_dev(next, cur), M4D_RACE_LOOKAHEAD_FRAC));
-
-    float d_cur = norm3_dev(sub3_dev(cur, pos));
-    float near_w = race_smoothstep01_dev((M4D_RACE_TURN_START - d_cur) / M4D_RACE_TURN_START);
-    float w = near_w * turn_w;
-
-    return add3_dev(scale3_dev(cur, 1.0f - w), scale3_dev(exit_wp, w));
-}
-
-__device__ float race_reward_distance_math_dev(const DroneCudaState* s, float3 pos) {
-    float3 wp = race_reward_lookahead_point_dev(s, pos);
-    return norm3_dev(sub3_dev(wp, pos));
-}
-
-__device__ float race_turn_speed_penalty_math_dev(const DroneCudaState* s, float speed) {
-    if (s->buffer_size <= 0) return 0.0f;
-
-    int idx = race_clamped_gate_idx_dev(s);
-    float theta = race_turn_angle_at_gate_dev(s, idx);
-    float turn_w = clampf_dev(theta / 1.5707963f, 0.0f, 1.0f);
-
-    float3 cur = s->ring_pos[idx];
-    float d_cur = norm3_dev(sub3_dev(cur, s->pos));
-    float near_w = race_smoothstep01_dev((M4D_RACE_TURN_START - d_cur) / M4D_RACE_TURN_START);
-
-    float excess = fmaxf(0.0f, speed - M4D_RACE_TURN_VSAFE);
-    float turn_penalty = -M4D_RACE_SPEED_K * turn_w * near_w * excess * excess;
-
-    float center_d = race_track_centerline_distance_dev(s);
-    float off_w = race_smoothstep01_dev((center_d - M4D_RACE_CENTER_CORRIDOR) / 4.0f);
-    float off_penalty = -0.50f * M4D_RACE_SPEED_K * off_w * excess * excess;
-
-    return turn_penalty + off_penalty;
-}
-
-__device__ float race_centerline_penalty_math_dev(const DroneCudaState* s) {
-    float d = race_track_centerline_distance_dev(s);
-    float excess = fmaxf(0.0f, d - M4D_RACE_CENTER_CORRIDOR);
-    return -M4D_RACE_CENTER_K * excess * excess;
-}
-
-__device__ float race_exit_velocity_alignment_math_dev(const DroneCudaState* s, int gate_idx) {
-    if (gate_idx < 0 || gate_idx + 1 >= s->buffer_size) {
-        return 0.0f;
-    }
-
-    float3 cur = s->ring_pos[gate_idx];
-    float3 next = s->ring_pos[gate_idx + 1];
-    float3 out_dir = normalize3_dev(sub3_dev(next, cur), s->ring_normal[gate_idx]);
-    float3 vel_dir = normalize3_dev(s->vel, out_dir);
-
-    return clampf_dev(dot3_dev(vel_dir, out_dir), -1.0f, 1.0f);
-}
-
 __device__ void race_isb_push_dev(const DroneCudaCtx& cfg, int agent_idx,
                                   const DroneCudaState* s, int target_idx,
                                   float pass_margin) {
@@ -2914,8 +2818,9 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
     move_drone_dev(&s, &p, delayed_actions);
     s.episode_length++;
 
-    float target_curr_dist = norm3_dev(sub3_dev(s.target_pos, s.pos));
-    bool oob = target_curr_dist > cfg.oob_radius;
+    float curr_dist = norm3_dev(sub3_dev(s.target_pos, s.pos));
+    float prev_dist = norm3_dev(sub3_dev(s.target_pos, s.prev_pos));
+    bool oob = curr_dist > cfg.oob_radius;
     bool timeout = s.episode_length >= cfg.horizon;
     int ring_result = 0;
     bool lap_complete = false;
@@ -2937,13 +2842,6 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
             lap_complete = cfg.race_segment_mode >= 1.0f
                 || (s.buffer_size > 0 && s.buffer_idx == s.buffer_size - 1);
             r_terminal += 0.2f;
-            if (current_gate_idx + 1 < s.buffer_size) {
-                float align = race_exit_velocity_alignment_math_dev(&s, current_gate_idx);
-                float margin = race_pass_margin_dev(&s, current_gate_idx);
-                float radius = fmaxf(s.ring_radius[current_gate_idx], 1e-3f);
-                float margin_norm = clampf_dev(margin / radius, -1.0f, 1.0f);
-                r_terminal += 2.0f * align + 0.50f * margin_norm;
-            }
         } else if (ring_result == -1) {
             s.ring_collision += 1.0f;
             s.collisions += 1.0f;
@@ -2970,29 +2868,13 @@ __global__ void drone_step_kernel(DroneCudaCtx cfg, const float* actions, float*
     float r_omega_z = -cfg.alpha_omega_z * fabsf(omega_z)
                     - cfg.alpha_omega_z_sq * cfg.alpha_omega_z_mult * omega_z * omega_z;
     float curr = hover_potential_dev(&s, cfg);
-    float prev_dist = cfg.task == DRONE_TASK_RACE
-        ? race_reward_distance_math_dev(&s, s.prev_pos)
-        : norm3_dev(sub3_dev(s.target_pos, s.prev_pos));
-    float curr_dist = cfg.task == DRONE_TASK_RACE
-        ? race_reward_distance_math_dev(&s, s.pos)
-        : target_curr_dist;
     float r_dist = cfg.alpha_dist * (prev_dist - curr_dist);
-    float speed = norm3_dev(s.vel);
-    float r_centerline = cfg.task == DRONE_TASK_RACE ? race_centerline_penalty_math_dev(&s) : 0.0f;
-    float r_turn_speed = cfg.task == DRONE_TASK_RACE ? race_turn_speed_penalty_math_dev(&s, speed) : 0.0f;
-    float r_hover = cfg.task == DRONE_TASK_RACE ? 0.0f : cfg.alpha_hover * curr;
-    float r_shaping = cfg.task == DRONE_TASK_RACE ? 0.0f : cfg.alpha_shaping * (curr - s.prev_potential);
+    float r_hover = cfg.alpha_hover * curr;
+    float r_shaping = cfg.alpha_shaping * (curr - s.prev_potential);
     float r_omega = r_omega_xy + r_omega_z;
     float r_action_delta = -cfg.alpha_action_delta * action_delta_mean
                          -cfg.alpha_reset_action_delta * reset_action_jump;
-    float reward = r_dist
-                 + r_centerline
-                 + r_turn_speed
-                 + r_hover
-                 + r_shaping
-                 + r_omega
-                 + r_terminal
-                 + r_action_delta;
+    float reward = r_dist + r_hover + r_shaping + r_omega + r_terminal + r_action_delta;
     s.prev_potential = curr;
 
     float h = check_hover_dev(&s, cfg);
